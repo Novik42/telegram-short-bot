@@ -119,10 +119,8 @@ def run_http_server():
     server = HTTPServer(('0.0.0.0', 10000), StubHandler)
     server.serve_forever()
 
-# 🔹 Запуск бота
+# 🔹 Запуск
 if __name__ == "__main__":
-    # Запуск заглушки
     threading.Thread(target=run_http_server, daemon=True).start()
-
-    # Запуск основного бота
+    time.sleep(2)  # дати Render час на сканування порту
     asyncio.run(main_loop())
