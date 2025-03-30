@@ -105,10 +105,7 @@ async def main_loop():
 
         await asyncio.sleep(3600)  # запуск раз на годину
 
-# 🔹 Запуск бота
-if __name__ == "__main__":
-    asyncio.run(main_loop())
-
+# 🔹 Простий HTTP-сервер-заглушка для Render
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -122,4 +119,7 @@ def run_http_server():
     server = HTTPServer(('0.0.0.0', 10000), StubHandler)
     server.serve_forever()
 
-threading.Thread(target=run_http_server, daemon=True).start()
+# 🔹 Запуск бота
+if __name__ == "__main__":
+    # Запуск заглушки
+    threading.Thread(target=run_http_server, daemon
