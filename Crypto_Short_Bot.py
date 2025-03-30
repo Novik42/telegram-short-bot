@@ -122,4 +122,7 @@ def run_http_server():
 # 🔹 Запуск бота
 if __name__ == "__main__":
     # Запуск заглушки
-    threading.Thread(target=run_http_server, daemon
+    threading.Thread(target=run_http_server, daemon=True).start()
+
+    # Запуск основного бота
+    asyncio.run(main_loop())
