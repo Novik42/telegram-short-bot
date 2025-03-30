@@ -108,3 +108,18 @@ async def main_loop():
 # 🔹 Запуск бота
 if __name__ == "__main__":
     asyncio.run(main_loop())
+
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class StubHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+def run_http_server():
+    server = HTTPServer(('0.0.0.0', 10000), StubHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_http_server, daemon=True).start()
