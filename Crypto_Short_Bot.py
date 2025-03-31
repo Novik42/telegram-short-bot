@@ -4,6 +4,8 @@ from bs4 import BeautifulSoup
 import asyncio
 import time
 from datetime import datetime
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # 🔹 Введи свій Telegram-токен і CHAT_ID
 TELEGRAM_TOKEN = "7793935034:AAGT6uSuzqN5hsCxkVbYKwLIoH-BkB4C2fc"
@@ -57,27 +59,68 @@ def get_latest_twitter_news():
         print(f"Помилка при отриманні новин з Twitter: {e}")
     return []
 
-# 🔹 Аналіз токенів
-def analyze_token(token):
+# 🔹 Скоринг токена та сигнал
+def score_token(token, premarket_price=None, news_mentions=None):
+    score = 0
+    reasons = []
+
+    if token.get("market_cap") and token["market_cap"] < 50_000_000:
+        score += 2
+        reasons.append("🧢 Низька капа")
+
+    if premarket_price and token["current_price"] > premarket_price * 1.5:
+        score += 2
+        reasons.append("📉 Перекуп на премаркеті")
+
+    if news_mentions:
+        score += 2
+        reasons.append("📰 Є згадка у новинах")
+
+    if token.get("price_change_percentage_24h", 0) < -10:
+        score += 2
+        reasons.append("📉 Дамп ціни")
+
+    if token.get("total_volume", 0) < 100_000:
+        score += 1
+        reasons.append("💤 Малий обсяг")
+
+    return score, reasons
+
+def determine_signal(score):
+    if score >= 7:
+        return "SHORT", "🔻 Шортовий ризик високий"
+    elif score <= 2:
+        return "LONG", "🟢 Потенціал для лонгу"
+    else:
+        return "⚠️ НЕВИЗНАЧЕНО", "Ризик нейтральний або змішаний"
+
+def build_message(token, score, reasons, signal_type, comment):
     name = token["name"]
     price = token["current_price"]
-    market_cap = token.get("market_cap", 0)
+    cap = token.get("market_cap", 0)
     symbol = token["symbol"].upper()
 
-    # 🔻 Фільтр популярних токенів
+    msg = f"🔍 *{name}* ({symbol})\n💰 Ціна: ${price:.4f}\n🧢 Капа: ${cap:,}\n"
+    msg += f"📊 Скоринг: {score}/10\n{comment}\n\n"
+    if reasons:
+        msg += "📌 Причини:\n" + "\n".join(f"– {r}" for r in reasons)
+
+    return msg
+
+# 🔹 Аналіз токена
+def analyze_token(token, news=None):
+    symbol = token["symbol"].upper()
     if symbol in ["BTC", "ETH", "USDT", "XRP", "BNB"]:
         return None
 
     premarket_price = get_mexc_premarket(symbol)
+    news_mentions = [n for n in news if symbol in n.upper()] if news else []
+    score, reasons = score_token(token, premarket_price, news_mentions)
+    signal_type, comment = determine_signal(score)
 
-    if market_cap > 100000000:
-        return None
-
-    result = f"🔥 Новий токен для шорту: {name}\n💰 Ціна: ${price}\n📉 Капіталізація: ${market_cap}\n"
-    if premarket_price:
-        result += f"⚡️ Премаркет на MEXC: ${premarket_price}\n"
-
-    return result
+    if signal_type in ["LONG", "SHORT"]:
+        return build_message(token, score, reasons, signal_type, comment)
+    return None
 
 # 🔹 Основна асинхронна функція
 async def main_loop():
@@ -88,7 +131,7 @@ async def main_loop():
             news = get_latest_twitter_news()
 
             for token in tokens:
-                result = analyze_token(token)
+                result = analyze_token(token, news)
                 if result:
                     await send_telegram_message(result)
                     save_to_file(result)
@@ -105,22 +148,14 @@ async def main_loop():
 
         await asyncio.sleep(3600)  # запуск раз на годину
 
-# 🔹 Простий HTTP-сервер-заглушка для Render
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
+# 🔹 HTTP-заглушка + запуск бота
 class StubHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is running")
 
-def run_http_server():
-    server = HTTPServer(('0.0.0.0', 10000), StubHandler)
-    server.serve_forever()
-
-# 🔹 Запуск
 if __name__ == "__main__":
-    threading.Thread(target=run_http_server, daemon=True).start()
-    time.sleep(2)  # дати Render час на сканування порту
+    threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 10000), StubHandler).serve_forever(), daemon=True).start()
+    time.sleep(2)
     asyncio.run(main_loop())
