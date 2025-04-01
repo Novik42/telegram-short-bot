@@ -1,5 +1,6 @@
 import requests
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from bs4 import BeautifulSoup
 import asyncio
 import time
@@ -47,7 +48,6 @@ def get_mexc_premarket(symbol):
 def get_mexc_new_listings():
     url = "https://www.mexc.com/open/api/v2/market/coin/list"
     response = requests.get(url).json()
-
     upcoming_tokens = []
 
     for coin in response.get('data', []):
@@ -86,7 +86,7 @@ def analyze_token(token):
         return None
 
     premarket_price = get_mexc_premarket(symbol)
-    if market_cap > 100000000:
+    if market_cap > 100_000_000:
         return None
 
     action = "SHORT" if premarket_price and premarket_price < price else "LONG"
@@ -105,6 +105,21 @@ def analyze_token(token):
 
     return result
 
+# 🔹 Команда /calendar
+async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    listings = get_mexc_new_listings()
+    if listings:
+        listings_message = "🟢 *Незабаром лістинги на MEXC:*\n\n"
+        for token in listings[:10]:
+            listings_message += (
+                f"🔸 *{token['name']}* ({token['symbol']})\n"
+                f"📅 Лістинг: {token['listing_time']}\n"
+                f"📌 Пара: {token['pair']}\n\n"
+            )
+        await update.message.reply_text(listings_message, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Немає запланованих лістингів.")
+
 # 🔹 Основна асинхронна функція
 async def main_loop():
     while True:
@@ -122,13 +137,12 @@ async def main_loop():
 
             if listings:
                 listings_message = "🟢 *Незабаром лістинги на MEXC:*\n\n"
-                for token in listings:
+                for token in listings[:10]:
                     listings_message += (
                         f"🔸 *{token['name']}* ({token['symbol']})\n"
                         f"📅 Лістинг: {token['listing_time']}\n"
                         f"📌 Пара: {token['pair']}\n\n"
                     )
-
                 await send_telegram_message(listings_message)
                 save_to_file(listings_message)
 
@@ -155,8 +169,16 @@ def run_http_server():
     server = HTTPServer(('0.0.0.0', 10000), StubHandler)
     server.serve_forever()
 
-threading.Thread(target=run_http_server, daemon=True).start()
-
 # 🔹 Запуск бота
+def run_bot():
+    threading.Thread(target=run_http_server, daemon=True).start()
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("calendar", calendar_command))
+
+    loop = asyncio.get_event_loop()
+    loop.create_task(main_loop())
+    app.run_polling()
+
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    run_bot()
