@@ -7,29 +7,29 @@ from datetime import datetime
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# 🔹 Telegram дані
+# 🔹 Конфігурація
 TELEGRAM_TOKEN = "7793935034:AAGT6uSuzqN5hsCxkVbYKwLIoH-BkB4C2fc"
 CHAT_ID = "334517684"
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# 🔹 Надсилання повідомлення
+# 🔹 Надсилання повідомлення в Telegram
 async def send_telegram_message(text):
     await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
 
-# 🔹 Збереження в файл
+# 🔹 Запис у файл
 def save_to_file(text):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open("short_signals_log.txt", "a") as f:
         f.write(f"[{timestamp}]\n{text}\n\n")
 
-# 🔹 Нові токени з CoinGecko
+# 🔹 CoinGecko — нові токени
 def get_new_tokens():
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {"vs_currency": "usd", "order": "newest", "per_page": 10, "page": 1}
     response = requests.get(url, params=params)
     return response.json()
 
-# 🔹 Премаркет з MEXC
+# 🔹 MEXC — премаркет
 def get_mexc_premarket(symbol):
     url = f"https://www.mexc.com/open/api/v2/market/depth?symbol={symbol}_USDT&depth=5"
     try:
@@ -42,7 +42,7 @@ def get_mexc_premarket(symbol):
         print(f"Помилка MEXC для {symbol}: {e}")
     return None
 
-# 🔹 Нові лістинги з MEXC
+# 🔹 MEXC — майбутні лістинги
 def get_mexc_new_listings():
     url = "https://www.mexc.com/open/api/v2/market/coin/list"
     try:
@@ -68,7 +68,7 @@ def get_mexc_new_listings():
         print(f"❌ Помилка при отриманні лістингів з MEXC: {e}")
         return []
 
-# 🔹 Twitter-новини
+# 🔹 Twitter/X новини
 def get_latest_twitter_news():
     url = "https://nitter.net/Lookonchain"
     try:
@@ -81,7 +81,7 @@ def get_latest_twitter_news():
         print(f"Помилка при отриманні новин з Twitter: {e}")
     return []
 
-# 🔹 Аналіз токена
+# 🔹 Аналіз токену
 def analyze_token(token):
     name = token["name"]
     price = token["current_price"]
@@ -105,6 +105,7 @@ def analyze_token(token):
         f"📉 Капіталізація: ${market_cap}\n"
         f"📊 Рейтинг: {rating}\n"
     )
+
     if premarket_price:
         result += f"⚡️ MEXC премаркет: ${premarket_price}\n"
 
@@ -126,48 +127,35 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Наразі немає майбутніх лістингів.")
 
 # 🔹 Основний цикл
-async def main_loop():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("calendar", calendar_command))
-    asyncio.create_task(application.run_polling())
+async def process_loop():
+    await send_telegram_message("🚀 Перевірка токенів стартувала.")
+    tokens = get_new_tokens()
+    news = get_latest_twitter_news()
+    listings = get_mexc_new_listings()
 
-    while True:
-        try:
-            await send_telegram_message("🚀 Перевірка токенів стартувала.")
-            tokens = get_new_tokens()
-            news = get_latest_twitter_news()
-            listings = get_mexc_new_listings()
+    for token in tokens:
+        result = analyze_token(token)
+        if result:
+            await send_telegram_message(result)
+            save_to_file(result)
 
-            for token in tokens:
-                result = analyze_token(token)
-                if result:
-                    await send_telegram_message(result)
-                    save_to_file(result)
+    if listings:
+        listings_message = "🟢 *Незабаром лістинги на MEXC:*\n\n"
+        for token in listings:
+            listings_message += (
+                f"🔸 *{token['name']}* ({token['symbol']})\n"
+                f"📅 Лістинг: {token['listing_time']}\n"
+                f"📌 Пара: {token['pair']}\n\n"
+            )
+        await send_telegram_message(listings_message)
+        save_to_file(listings_message)
 
-            if listings:
-                listings_message = "🟢 *Незабаром лістинги на MEXC:*\n\n"
-                for token in listings:
-                    listings_message += (
-                        f"🔸 *{token['name']}* ({token['symbol']})\n"
-                        f"📅 Лістинг: {token['listing_time']}\n"
-                        f"📌 Пара: {token['pair']}\n\n"
-                    )
-                await send_telegram_message(listings_message)
-                save_to_file(listings_message)
+    if news:
+        news_text = "📰 *Останні новини:*\n" + "\n".join(news)
+        await send_telegram_message(news_text)
+        save_to_file(news_text)
 
-            if news:
-                news_text = "📰 *Останні новини:*\n" + "\n".join(news)
-                await send_telegram_message(news_text)
-                save_to_file(news_text)
-
-        except Exception as e:
-            error_msg = f"❌ Помилка в циклі: {e}"
-            print(error_msg)
-            save_to_file(error_msg)
-
-        await asyncio.sleep(3600)
-
-# 🔹 HTTP-заглушка (Render)
+# 🔹 Старт http-сервера (для Render)
 class StubHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -178,8 +166,26 @@ def run_http_server():
     server = HTTPServer(('0.0.0.0', 10000), StubHandler)
     server.serve_forever()
 
-threading.Thread(target=run_http_server, daemon=True).start()
+# 🔹 Запуск Telegram бота і фонових задач
+async def start():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("calendar", calendar_command))
 
-# 🔹 Старт
+    threading.Thread(target=run_http_server, daemon=True).start()
+
+    # Паралельний запуск application + циклу
+    async def background_tasks():
+        while True:
+            try:
+                await process_loop()
+            except Exception as e:
+                error_msg = f"❌ Помилка в циклі: {e}"
+                print(error_msg)
+                save_to_file(error_msg)
+            await asyncio.sleep(3600)
+
+    await asyncio.gather(application.run_polling(), background_tasks())
+
+# 🔹 Запуск
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    asyncio.run(start())
