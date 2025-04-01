@@ -18,7 +18,7 @@ async def send_telegram_message(text):
 def save_to_file(text):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open("short_signals_log.txt", "a") as f:
-        f.write(f"[{timestamp}]
+        f.write(f"[{timestamp}]\n{text}\n\n")
 {text}
 
 ")
