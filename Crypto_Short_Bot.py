@@ -8,8 +8,8 @@ from datetime import datetime
 import time
 
 # 🔹 Введи свій Telegram-токен і CHAT_ID
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
+TELEGRAM_TOKEN = "7793935034:AAGT6uSuzqN5hsCxkVbYKwLIoH-BkB4C2fc"
+CHAT_ID = "334517684"
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
