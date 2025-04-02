@@ -3,21 +3,22 @@ from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from bs4 import BeautifulSoup
 import asyncio
-import time
 from datetime import datetime
-import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
+import os
 
 # 🔹 Конфігурація
 TELEGRAM_TOKEN = "7793935034:AAGT6uSuzqN5hsCxkVbYKwLIoH-BkB4C2fc"
 CHAT_ID = "334517684"
+WEBHOOK_URL = "https://<your-render-domain>.onrender.com/webhook"  # заміни <your-render-domain>
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # 🔹 Надсилання повідомлення
 async def send_telegram_message(text):
     await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
 
-# 🔹 Логи в файл
+# 🔹 Логи
 def save_to_file(text):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open("short_signals_log.txt", "a") as f:
@@ -43,23 +44,23 @@ def get_mexc_premarket(symbol):
         print(f"Помилка MEXC для {symbol}: {e}")
     return None
 
-# 🔹 Лістинги MEXC
+# 🔹 Лістинги
 def get_mexc_new_listings():
     url = "https://www.mexc.com/open/api/v2/market/coin/list"
     try:
         response = requests.get(url)
         data = response.json()
-        upcoming_tokens = []
-        for coin in data.get('data', []):
-            if isinstance(coin, dict) and coin.get('status') == 'UPCOMING':
-                listing_time = datetime.fromtimestamp(coin['createTime'] / 1000).strftime('%Y-%m-%d %H:%M:%S')
-                upcoming_tokens.append({
-                    'name': coin.get('name', 'N/A'),
-                    'symbol': coin.get('currency', 'N/A'),
-                    'listing_time': listing_time,
-                    'pair': f"{coin.get('currency', 'N/A')}/USDT"
+        tokens = []
+        for coin in data.get("data", []):
+            if isinstance(coin, dict) and coin.get("status") == "UPCOMING":
+                listing_time = datetime.fromtimestamp(coin["createTime"] / 1000).strftime('%Y-%m-%d %H:%M:%S')
+                tokens.append({
+                    "name": coin.get("name", "N/A"),
+                    "symbol": coin.get("currency", "N/A"),
+                    "listing_time": listing_time,
+                    "pair": f"{coin.get('currency')}/USDT"
                 })
-        return upcoming_tokens
+        return tokens
     except Exception as e:
         print(f"❌ Помилка при отриманні лістингів з MEXC: {e}")
         return []
@@ -76,19 +77,23 @@ def get_latest_twitter_news():
         print(f"Помилка при отриманні новин з Twitter: {e}")
         return []
 
-# 🔹 Аналіз токену
+# 🔹 Аналіз токена
 def analyze_token(token):
     name = token["name"]
     price = token["current_price"]
     market_cap = token.get("market_cap", 0)
     symbol = token["symbol"].upper()
+
     if symbol in ["BTC", "ETH", "USDT", "XRP", "BNB"]:
         return None
+
     premarket_price = get_mexc_premarket(symbol)
     if market_cap > 100_000_000:
         return None
+
     action = "SHORT" if premarket_price and premarket_price < price else "LONG"
     rating = "⚠️ Високий ризик" if action == "SHORT" else "✅ Помірний ризик"
+
     result = (
         f"🚨 *{action}-сигнал!*\n"
         f"🔸 {name} ({symbol})\n"
@@ -96,8 +101,10 @@ def analyze_token(token):
         f"📉 Капіталізація: ${market_cap}\n"
         f"📊 Рейтинг: {rating}\n"
     )
+
     if premarket_price:
         result += f"⚡️ MEXC премаркет: ${premarket_price}\n"
+
     return result
 
 # 🔹 /calendar
@@ -115,7 +122,7 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "Наразі немає майбутніх лістингів."
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# 🔹 Асинхронний цикл
+# 🔹 Фонові задачі
 async def background_tasks():
     while True:
         try:
@@ -164,15 +171,21 @@ def run_http_server():
     server = HTTPServer(('0.0.0.0', 10000), StubHandler)
     server.serve_forever()
 
-# 🔹 Старт
+# 🔹 Основна функція з вебхуком
 async def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("calendar", calendar_command))
     threading.Thread(target=run_http_server, daemon=True).start()
-    task1 = asyncio.create_task(application.initialize())
-    await task1
+
+    await application.initialize()
+    await application.bot.set_webhook(url=WEBHOOK_URL)
     await application.start()
-    asyncio.create_task(application.updater.start_polling())
+    await application.updater.start_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000)),
+        url_path="/webhook",
+        webhook_url=WEBHOOK_URL,
+    )
     await background_tasks()
 
 if __name__ == "__main__":
