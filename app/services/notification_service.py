@@ -100,6 +100,14 @@ class TelegramNotificationService:
                 )
             ).all()
         for event in events:
+            if not self._should_notify_anomaly(event):
+                log.info(
+                    "telegram_anomaly_suppressed_for_research",
+                    event_id=event.id,
+                    symbol=event.symbol,
+                    scenario=(event.reason_json or {}).get("scenario"),
+                )
+                continue
             try:
                 await self.bot.send_message(self.chat_id, self._format_anomaly(event))
             except TelegramAPIError as exc:
@@ -210,10 +218,16 @@ class TelegramNotificationService:
                 await session.scalars(
                     select(AnomalyEvent)
                     .order_by(AnomalyEvent.detected_at.desc())
-                    .limit(limit)
+                    .limit(max(limit * 20, 100))
                 )
             ).all()
-        return [self._format_anomaly(event) for event in events]
+        actionable = [event for event in events if self._should_notify_anomaly(event)]
+        return [self._format_anomaly(event) for event in actionable[:limit]]
+
+    @staticmethod
+    def _should_notify_anomaly(event: AnomalyEvent) -> bool:
+        scenario = str((event.reason_json or {}).get("scenario") or "UNKNOWN")
+        return scenario in {"POST_PUMP_BORROW", "DURING_PUMP_BORROW"}
 
     def _format_anomaly(self, event: AnomalyEvent) -> str:
         reason = event.reason_json or {}

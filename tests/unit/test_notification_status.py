@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.bot.keyboards import main_keyboard
+from app.models.anomaly import AnomalyEvent
 from app.models.borrow import BorrowSnapshot
 from app.services.notification_service import (
     BorrowChange,
@@ -53,3 +54,12 @@ def test_main_keyboard_contains_watch_and_reports() -> None:
     texts = [button.text for row in main_keyboard().keyboard for button in row]
 
     assert texts == ["👀 WATCH", "📊 STATUS", "🚨 RECENT", "📈 STATS"]
+
+
+def test_no_pump_anomaly_is_saved_but_not_selected_for_telegram() -> None:
+    event = AnomalyEvent(reason_json={"scenario": "NO_PUMP"})
+
+    assert TelegramNotificationService._should_notify_anomaly(event) is False
+
+    event.reason_json = {"scenario": "POST_PUMP_BORROW"}
+    assert TelegramNotificationService._should_notify_anomaly(event) is True
