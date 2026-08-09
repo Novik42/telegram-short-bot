@@ -1,0 +1,24 @@
+[
+  {
+    "timestamp": "2026-08-09T06:40:00Z",
+    "items": [
+      {"symbol": "KAITO", "borrow_usd": 10500, "repay_usd": 805.6},
+      {"symbol": "LISTA", "borrow_usd": 85000, "repay_usd": 22000}
+    ]
+  },
+  {
+    "timestamp": "2026-08-09T06:45:00Z",
+    "items": [
+      {"symbol": "KAITO", "borrow_usd": 257500, "repay_usd": 68500},
+      {"symbol": "LISTA", "borrow_usd": 91000, "repay_usd": 24000}
+    ]
+  },
+  {
+    "timestamp": "2026-08-09T06:50:00Z",
+    "items": [
+      {"symbol": "KAITO", "borrow_usd": 612000, "repay_usd": 110500},
+      {"symbol": "LISTA", "borrow_usd": 93000, "repay_usd": 25000}
+    ]
+  }
+]
+
