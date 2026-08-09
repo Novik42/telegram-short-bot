@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -16,41 +15,13 @@ from app.bot.keyboards import main_keyboard
 from app.models.anomaly import AnomalyEvent, EventOutcome
 from app.models.borrow import BorrowSnapshot
 from app.models.market import Candle, MarketSnapshot
+from app.models.watch import PumpWatch, PumpWatchTransition
+from app.services.borrow_change import BorrowChange, calculate_borrow_change
 from app.services.collector import CollectionResult
 from app.services.price_analyzer import PriceContext, analyze_price_context
+from app.utils.datetime import utc_now
 
 log = structlog.get_logger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class BorrowChange:
-    delta_usd: Decimal
-    delta_pct: Decimal | None
-
-
-def calculate_borrow_change(
-    rows: list[BorrowSnapshot], latest: BorrowSnapshot, *, minutes: int
-) -> BorrowChange | None:
-    target = latest.source_timestamp - timedelta(minutes=minutes)
-    before = max(
-        (
-            row
-            for row in rows
-            if row.symbol == latest.symbol
-            and row.source_name == latest.source_name
-            and row.source_timestamp <= target
-            and row.source_timestamp < latest.source_timestamp
-        ),
-        key=lambda row: row.source_timestamp,
-        default=None,
-    )
-    if before is None:
-        return None
-    delta = latest.borrow_usd - before.borrow_usd
-    delta_pct = (
-        delta / before.borrow_usd * Decimal("100") if before.borrow_usd > 0 else None
-    )
-    return BorrowChange(delta_usd=delta, delta_pct=delta_pct)
 
 
 def compact_number(value: Decimal | None) -> str:
@@ -137,6 +108,101 @@ class TelegramNotificationService:
                     event_id=event.id,
                     error=str(exc),
                 )
+
+    async def notify_reversal_transitions(self) -> None:
+        if self.chat_id is None:
+            return
+        async with self.session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(PumpWatchTransition, PumpWatch)
+                    .join(PumpWatch, PumpWatch.id == PumpWatchTransition.pump_watch_id)
+                    .where(
+                        PumpWatchTransition.status.in_(
+                            ("REVERSAL_WARNING", "SHORT_CONFIRMED")
+                        ),
+                        PumpWatchTransition.notified_at.is_(None),
+                    )
+                    .order_by(PumpWatchTransition.occurred_at)
+                )
+            ).all()
+            for transition, watch in rows:
+                try:
+                    await self.bot.send_message(
+                        self.chat_id,
+                        self._format_reversal_transition(transition, watch),
+                        reply_markup=main_keyboard(),
+                    )
+                except TelegramAPIError as exc:
+                    log.error(
+                        "telegram_reversal_notification_failed",
+                        transition_id=transition.id,
+                        error=str(exc),
+                    )
+                    continue
+                transition.notified_at = utc_now()
+            await session.commit()
+
+    def _format_reversal_transition(
+        self, transition: PumpWatchTransition, watch: PumpWatch
+    ) -> str:
+        reasons = transition.reason_json.get("reasons", []) if transition.reason_json else []
+        reason_labels = {
+            "closed_5m_below_local_support": "5m закрилась нижче локальної підтримки",
+            "confirmed_lower_high": "сформовано нижчий локальний максимум",
+            "next_5m_close_failed_to_reclaim_support": (
+                "наступна 5m свічка не повернула підтримку"
+            ),
+        }
+        readable_reasons = []
+        for reason in reasons:
+            label = reason_labels.get(str(reason))
+            if label is None and str(reason).startswith("drawdown_from_peak_gte_"):
+                label = "відкат від піку досяг порога попередження"
+            elif label is None and str(reason).startswith("drawdown_gte_"):
+                label = "сильний відкат разом із пробоєм підтримки"
+            if label and label not in readable_reasons:
+                readable_reasons.append(label)
+
+        confirmed = transition.status == "SHORT_CONFIRMED"
+        lines = [
+            (
+                f"🔻 РОЗВОРОТ ПІДТВЕРДЖЕНО: {watch.symbol}"
+                if confirmed
+                else f"⚠️ ПОПЕРЕДЖЕННЯ РОЗВОРОТУ: {watch.symbol}"
+            ),
+            "",
+            f"Час: {self._format_time(transition.occurred_at)}",
+            f"Price: ${compact_number(transition.price)}",
+            f"Peak: ${compact_number(transition.peak_price)}",
+            f"Відкат від піку: -{transition.drawdown_pct:.2f}%",
+        ]
+        if transition.support_price is not None:
+            lines.append(f"5m support: ${compact_number(transition.support_price)}")
+        lines.extend(
+            [
+                f"1h: {self._percent(transition.price_change_1h)} | "
+                f"4h: {self._percent(transition.price_change_4h)}",
+                f"BOR: ${compact_number(transition.borrow_usd)} | "
+                f"B/R {compact_number(transition.borrow_repay_ratio)}",
+                f"ΔBOR 3m: {self._signed_money(transition.borrow_delta_3m)} | "
+                f"15m: {self._signed_money(transition.borrow_delta_15m)}",
+            ]
+        )
+        if readable_reasons:
+            lines.extend(["", "Ознаки:", *(f"• {reason}" for reason in readable_reasons)])
+        lines.extend(
+            [
+                "",
+                (
+                    "Структура ціни підтвердила розворот, але це не автоматичний вхід."
+                    if confirmed
+                    else "Це раннє попередження. Чекаємо закріплення нижче підтримки."
+                ),
+                "Research signal — no automatic trading",
+            ]
+        )
+        return "\n".join(lines)
 
     async def recent_anomaly_messages(self, *, limit: int = 3) -> list[str]:
         async with self.session_factory() as session:
@@ -247,6 +313,19 @@ class TelegramNotificationService:
             if latest_source_at is None:
                 return "👀 WATCH\n\nДаних для аналізу ще немає."
 
+            watch_rows = list(
+                (
+                    await session.scalars(
+                        select(PumpWatch)
+                        .where(
+                            PumpWatch.status.in_(
+                                ("WATCH", "REVERSAL_WARNING", "SHORT_CONFIRMED")
+                            )
+                        )
+                        .order_by(PumpWatch.started_at.desc())
+                    )
+                ).all()
+            )
             borrow_rows = list(
                 (
                     await session.scalars(
@@ -262,7 +341,10 @@ class TelegramNotificationService:
                     )
                 ).all()
             )
-            symbols = sorted({row.symbol for row in borrow_rows})
+            symbols = sorted(
+                {row.symbol for row in borrow_rows}
+                | {row.symbol for row in watch_rows}
+            )
             market_rows: list[MarketSnapshot] = []
             candle_rows: list[Candle] = []
             event_rows: list[AnomalyEvent] = []
@@ -322,6 +404,9 @@ class TelegramNotificationService:
         latest_event: dict[str, AnomalyEvent] = {}
         for row in event_rows:
             latest_event.setdefault(row.symbol, row)
+        latest_watch: dict[str, PumpWatch] = {}
+        for row in watch_rows:
+            latest_watch.setdefault(row.symbol, row)
 
         watches: list[
             tuple[
@@ -333,6 +418,7 @@ class TelegramNotificationService:
                 BorrowChange | None,
                 BorrowChange | None,
                 AnomalyEvent | None,
+                PumpWatch | None,
             ]
         ] = []
         for symbol, borrow in latest_borrow.items():
@@ -342,7 +428,11 @@ class TelegramNotificationService:
             price = analyze_price_context(
                 candle_history.get(symbol, []), borrow.source_timestamp
             )
-            if price.scenario not in {"POST_PUMP_BORROW", "DURING_PUMP_BORROW"}:
+            watch = latest_watch.get(symbol)
+            if watch is None and price.scenario not in {
+                "POST_PUMP_BORROW",
+                "DURING_PUMP_BORROW",
+            }:
                 continue
             strength = max(
                 price.price_change_1h or Decimal("0"),
@@ -362,6 +452,7 @@ class TelegramNotificationService:
                         borrow_history.get(symbol, []), borrow, minutes=15
                     ),
                     latest_event.get(symbol),
+                    watch,
                 )
             )
 
@@ -379,12 +470,21 @@ class TelegramNotificationService:
             )
             return "\n".join(lines)
 
-        for _strength, symbol, borrow, market, price, change_3m, change_15m, event in sorted(
-            watches, key=lambda item: item[0], reverse=True
-        ):
+        for (
+            _strength,
+            symbol,
+            borrow,
+            market,
+            price,
+            change_3m,
+            change_15m,
+            event,
+            watch,
+        ) in sorted(watches, key=lambda item: item[0], reverse=True):
             lines.extend(
                 [
-                    f"🪙 {symbol} — {self._pump_label(price)}",
+                    f"🪙 {symbol} — "
+                    f"{self._watch_state_label(watch) if watch else self._pump_label(price)}",
                     f"Price ${compact_number(market.price)} | "
                     f"1h {self._percent(price.price_change_1h)} | "
                     f"4h {self._percent(price.price_change_4h)}",
@@ -397,10 +497,17 @@ class TelegramNotificationService:
                         if event is not None
                         else "BOR anomaly: ⏳ не підтверджено"
                     ),
-                    "",
                 ]
             )
-        lines.append("WATCH ≠ готовий short. Чекаємо BOR або розворот ціни.")
+            if watch is not None:
+                lines.append(
+                    f"Peak ${compact_number(watch.peak_price)} | "
+                    f"відкат -{watch.drawdown_pct:.2f}%"
+                )
+                if watch.support_price is not None:
+                    lines.append(f"5m support ${compact_number(watch.support_price)}")
+            lines.append("")
+        lines.append("SHORT CONFIRMED — це дослідницький сигнал, не автоматичний вхід.")
         return "\n".join(lines)
 
     @staticmethod
@@ -565,6 +672,24 @@ class TelegramNotificationService:
         )
         percent = f" ({change.delta_pct:+.1f}%)" if change.delta_pct is not None else ""
         return amount + percent
+
+    @staticmethod
+    def _signed_money(value: Decimal | None) -> str:
+        if value is None:
+            return "n/a"
+        return (
+            f"+${compact_number(value)}"
+            if value >= 0
+            else f"-${compact_number(abs(value))}"
+        )
+
+    @staticmethod
+    def _watch_state_label(watch: PumpWatch) -> str:
+        return {
+            "WATCH": "👀 WATCH / памп активний",
+            "REVERSAL_WARNING": "⚠️ REVERSAL WARNING",
+            "SHORT_CONFIRMED": "🔻 SHORT CONFIRMED",
+        }.get(watch.status, watch.status)
 
     @staticmethod
     def _pump_label(price: PriceContext) -> str:

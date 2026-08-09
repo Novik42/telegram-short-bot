@@ -9,6 +9,8 @@ def test_stage_one_database_schema_contains_all_research_tables() -> None:
         "anomaly_events",
         "event_outcomes",
         "notification_log",
+        "pump_watches",
+        "pump_watch_transitions",
     }
 
 
@@ -20,4 +22,3 @@ def test_borrow_snapshot_deduplication_constraint() -> None:
         if constraint.__class__.__name__ == "UniqueConstraint"
     }
     assert ("source_name", "symbol", "source_timestamp") in unique_column_sets
-

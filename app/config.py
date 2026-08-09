@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     alert_renotify_score_increase: Decimal = Decimal("15")
     alert_renotify_borrow_increase_pct: Decimal = Decimal("50")
 
+    reversal_watch_hours: int = Field(default=6, ge=1, le=48)
+    reversal_warning_drawdown_pct: Decimal = Decimal("3")
+    reversal_confirm_drawdown_pct: Decimal = Decimal("5")
+    reversal_support_lookback_candles: int = Field(default=4, ge=2, le=12)
+    reversal_lower_high_drop_pct: Decimal = Decimal("0.5")
+
     @property
     def collection_seconds(self) -> int:
         return self.collection_interval_seconds or self.collection_interval_minutes * 60

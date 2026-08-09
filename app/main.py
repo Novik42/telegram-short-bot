@@ -46,9 +46,11 @@ async def run() -> None:
     async def collect_and_notify() -> None:
         result = await runtime.collector.collect_once()
         await runtime.outcome_evaluator.evaluate_due()
+        await runtime.reversal_tracker.evaluate_latest()
         if notifier is not None:
             await notifier.notify_collection(result)
             await notifier.notify_anomalies(result.anomaly_event_ids)
+            await notifier.notify_reversal_transitions()
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(

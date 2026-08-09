@@ -11,6 +11,7 @@ from app.providers.borrow_fixture import FixtureBorrowProvider
 from app.services.anomaly_detector import AnomalyDetector
 from app.services.collector import Collector
 from app.services.outcome_evaluator import OutcomeEvaluator
+from app.services.reversal_tracker import ReversalTracker
 
 
 @dataclass(slots=True)
@@ -21,6 +22,7 @@ class Runtime:
     market_provider: BinanceMarketDataProvider
     collector: Collector
     outcome_evaluator: OutcomeEvaluator
+    reversal_tracker: ReversalTracker
 
     async def close(self) -> None:
         await self.borrow_provider.aclose()
@@ -63,4 +65,5 @@ def build_runtime(settings: Settings) -> Runtime:
             anomaly_detector=anomaly_detector,
         ),
         outcome_evaluator=OutcomeEvaluator(session_factory, market_provider),
+        reversal_tracker=ReversalTracker(session_factory, settings),
     )
