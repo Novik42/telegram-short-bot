@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,10 +14,42 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.anomaly import AnomalyEvent, EventOutcome
 from app.models.borrow import BorrowSnapshot
-from app.models.market import MarketSnapshot
+from app.models.market import Candle, MarketSnapshot
 from app.services.collector import CollectionResult
+from app.services.price_analyzer import PriceContext, analyze_price_context
 
 log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class BorrowChange:
+    delta_usd: Decimal
+    delta_pct: Decimal | None
+
+
+def calculate_borrow_change(
+    rows: list[BorrowSnapshot], latest: BorrowSnapshot, *, minutes: int
+) -> BorrowChange | None:
+    target = latest.source_timestamp - timedelta(minutes=minutes)
+    before = max(
+        (
+            row
+            for row in rows
+            if row.symbol == latest.symbol
+            and row.source_name == latest.source_name
+            and row.source_timestamp <= target
+            and row.source_timestamp < latest.source_timestamp
+        ),
+        key=lambda row: row.source_timestamp,
+        default=None,
+    )
+    if before is None:
+        return None
+    delta = latest.borrow_usd - before.borrow_usd
+    delta_pct = (
+        delta / before.borrow_usd * Decimal("100") if before.borrow_usd > 0 else None
+    )
+    return BorrowChange(delta_usd=delta, delta_pct=delta_pct)
 
 
 def compact_number(value: Decimal | None) -> str:
@@ -243,20 +276,52 @@ class TelegramNotificationService:
             market_count = int(
                 await session.scalar(select(func.count(MarketSnapshot.id))) or 0
             )
-            borrow_rows = (
-                await session.scalars(
-                    select(BorrowSnapshot)
-                    .order_by(BorrowSnapshot.source_timestamp.desc(), BorrowSnapshot.id.desc())
-                    .limit(50)
+            latest_source_at = await session.scalar(
+                select(func.max(BorrowSnapshot.source_timestamp))
+            )
+            borrow_rows = []
+            if latest_source_at is not None:
+                borrow_rows = list(
+                    (
+                        await session.scalars(
+                            select(BorrowSnapshot)
+                            .where(
+                                BorrowSnapshot.source_timestamp
+                                >= latest_source_at - timedelta(hours=1)
+                            )
+                            .order_by(
+                                BorrowSnapshot.source_timestamp.desc(),
+                                BorrowSnapshot.id.desc(),
+                            )
+                        )
+                    ).all()
                 )
-            ).all()
             market_rows = (
                 await session.scalars(
                     select(MarketSnapshot)
                     .order_by(MarketSnapshot.captured_at.desc(), MarketSnapshot.id.desc())
-                    .limit(50)
+                    .limit(100)
                 )
             ).all()
+
+            symbols = sorted({row.symbol for row in borrow_rows})
+            candle_rows: list[Candle] = []
+            if symbols and latest_source_at is not None:
+                candle_rows = list(
+                    (
+                        await session.scalars(
+                            select(Candle)
+                            .where(
+                                Candle.symbol.in_(symbols),
+                                Candle.interval == "5m",
+                                Candle.open_time
+                                >= latest_source_at - timedelta(hours=5),
+                                Candle.open_time <= latest_source_at,
+                            )
+                            .order_by(Candle.symbol, Candle.open_time)
+                        )
+                    ).all()
+                )
 
         latest_borrow: dict[str, BorrowSnapshot] = {}
         for row in borrow_rows:
@@ -264,6 +329,12 @@ class TelegramNotificationService:
         latest_market: dict[str, MarketSnapshot] = {}
         for row in market_rows:
             latest_market.setdefault(row.symbol, row)
+        borrow_history: dict[str, list[BorrowSnapshot]] = {}
+        for row in borrow_rows:
+            borrow_history.setdefault(row.symbol, []).append(row)
+        candle_history: dict[str, list[Candle]] = {}
+        for row in candle_rows:
+            candle_history.setdefault(row.symbol, []).append(row)
 
         lines = [
             "📊 MARGIN MONITOR",
@@ -287,14 +358,56 @@ class TelegramNotificationService:
                     f"BOR ${compact_number(borrow.borrow_usd)} | "
                     f"REP ${compact_number(borrow.repay_usd)} | B/R {ratio}"
                 )
+                change_3m = calculate_borrow_change(
+                    borrow_history.get(symbol, []), borrow, minutes=3
+                )
+                change_15m = calculate_borrow_change(
+                    borrow_history.get(symbol, []), borrow, minutes=15
+                )
+                lines.append(
+                    f"ΔBOR 3m {self._format_borrow_change(change_3m)} | "
+                    f"15m {self._format_borrow_change(change_15m)}"
+                )
             if market:
+                price = (
+                    analyze_price_context(
+                        candle_history.get(symbol, []), borrow.source_timestamp
+                    )
+                    if borrow
+                    else PriceContext()
+                )
                 lines.append(
                     f"Price ${compact_number(market.price)} | "
+                    f"1h {self._percent(price.price_change_1h)} | "
+                    f"4h {self._percent(price.price_change_4h)}"
+                )
+                lines.append(
+                    f"Режим: {self._pump_label(price)} | "
                     f"Vol24h ${compact_number(market.quote_volume_24h)}"
                 )
             lines.append("")
         lines.append("Research data only — no automatic trading")
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_borrow_change(change: BorrowChange | None) -> str:
+        if change is None:
+            return "n/a"
+        amount = (
+            f"+${compact_number(change.delta_usd)}"
+            if change.delta_usd >= 0
+            else f"-${compact_number(abs(change.delta_usd))}"
+        )
+        percent = f" ({change.delta_pct:+.1f}%)" if change.delta_pct is not None else ""
+        return amount + percent
+
+    @staticmethod
+    def _pump_label(price: PriceContext) -> str:
+        return {
+            "POST_PUMP_BORROW": "🔥 PUMP біля 4h high",
+            "DURING_PUMP_BORROW": "⚠️ PUMP / відкат",
+            "NO_PUMP": "NO PUMP",
+        }.get(price.scenario, "UNKNOWN")
 
     async def render_research_stats(self) -> str:
         async with self.session_factory() as session:
