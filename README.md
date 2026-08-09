@@ -23,7 +23,8 @@ Borrow/Repay та незалежних публічних ринкових да�
 - точний час бази, першого BOR-стрибка та підтвердження другим snapshot-ом;
 - price/volume context і сценарії `NO_PUMP`, `DURING_PUMP_BORROW`,
   `POST_PUMP_BORROW`;
-- Telegram `/start`, `/status`, `/recent`, `/stats` та автоматичні anomaly alerts;
+- Telegram `/start`, `/status`, `/watch`, `/recent`, `/stats`, постійні кнопки
+  звітів та автоматичні anomaly alerts;
 - у звичайному Telegram snapshot для кожного символу: ΔBOR 3m/15m,
   price change 1h/4h і мітка `PUMP / NO PUMP`;
 - автоматичну оцінку кожного живого сигналу через 15 хв, 1 год, 4 год і 24 год;

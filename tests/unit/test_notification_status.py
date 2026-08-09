@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from app.bot.keyboards import main_keyboard
 from app.models.borrow import BorrowSnapshot
 from app.services.notification_service import (
     BorrowChange,
@@ -46,3 +47,9 @@ def test_status_labels_pump_and_formats_negative_delta() -> None:
         )
         == "-$125.00K (-25.0%)"
     )
+
+
+def test_main_keyboard_contains_watch_and_reports() -> None:
+    texts = [button.text for row in main_keyboard().keyboard for button in row]
+
+    assert texts == ["👀 WATCH", "📊 STATUS", "🚨 RECENT", "📈 STATS"]

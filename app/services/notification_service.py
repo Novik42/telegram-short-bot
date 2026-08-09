@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramAPIError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bot.keyboards import main_keyboard
 from app.models.anomaly import AnomalyEvent, EventOutcome
 from app.models.borrow import BorrowSnapshot
 from app.models.market import Candle, MarketSnapshot
@@ -112,7 +113,7 @@ class TelegramNotificationService:
         else:
             text = "✅ Нові дані зібрано\n\n" + await self.render_status()
         try:
-            await self.bot.send_message(self.chat_id, text)
+            await self.bot.send_message(self.chat_id, text, reply_markup=main_keyboard())
         except TelegramAPIError as exc:
             log.error("telegram_notification_failed", error=str(exc))
 
@@ -236,6 +237,170 @@ class TelegramNotificationService:
                 ]
             )
         lines.extend(["", "Research signal — no automatic trading"])
+        return "\n".join(lines)
+
+    async def render_watchlist(self) -> str:
+        async with self.session_factory() as session:
+            latest_source_at = await session.scalar(
+                select(func.max(BorrowSnapshot.source_timestamp))
+            )
+            if latest_source_at is None:
+                return "👀 WATCH\n\nДаних для аналізу ще немає."
+
+            borrow_rows = list(
+                (
+                    await session.scalars(
+                        select(BorrowSnapshot)
+                        .where(
+                            BorrowSnapshot.source_timestamp
+                            >= latest_source_at - timedelta(hours=1)
+                        )
+                        .order_by(
+                            BorrowSnapshot.source_timestamp.desc(),
+                            BorrowSnapshot.id.desc(),
+                        )
+                    )
+                ).all()
+            )
+            symbols = sorted({row.symbol for row in borrow_rows})
+            market_rows: list[MarketSnapshot] = []
+            candle_rows: list[Candle] = []
+            event_rows: list[AnomalyEvent] = []
+            if symbols:
+                market_rows = list(
+                    (
+                        await session.scalars(
+                            select(MarketSnapshot)
+                            .where(MarketSnapshot.symbol.in_(symbols))
+                            .order_by(
+                                MarketSnapshot.captured_at.desc(),
+                                MarketSnapshot.id.desc(),
+                            )
+                        )
+                    ).all()
+                )
+                candle_rows = list(
+                    (
+                        await session.scalars(
+                            select(Candle)
+                            .where(
+                                Candle.symbol.in_(symbols),
+                                Candle.interval == "5m",
+                                Candle.open_time
+                                >= latest_source_at - timedelta(hours=5),
+                                Candle.open_time <= latest_source_at,
+                            )
+                            .order_by(Candle.symbol, Candle.open_time)
+                        )
+                    ).all()
+                )
+                event_rows = list(
+                    (
+                        await session.scalars(
+                            select(AnomalyEvent)
+                            .where(
+                                AnomalyEvent.symbol.in_(symbols),
+                                AnomalyEvent.detected_at
+                                >= latest_source_at - timedelta(hours=4),
+                            )
+                            .order_by(AnomalyEvent.detected_at.desc())
+                        )
+                    ).all()
+                )
+
+        latest_borrow: dict[str, BorrowSnapshot] = {}
+        borrow_history: dict[str, list[BorrowSnapshot]] = {}
+        for row in borrow_rows:
+            latest_borrow.setdefault(row.symbol, row)
+            borrow_history.setdefault(row.symbol, []).append(row)
+        latest_market: dict[str, MarketSnapshot] = {}
+        for row in market_rows:
+            latest_market.setdefault(row.symbol, row)
+        candle_history: dict[str, list[Candle]] = {}
+        for row in candle_rows:
+            candle_history.setdefault(row.symbol, []).append(row)
+        latest_event: dict[str, AnomalyEvent] = {}
+        for row in event_rows:
+            latest_event.setdefault(row.symbol, row)
+
+        watches: list[
+            tuple[
+                Decimal,
+                str,
+                BorrowSnapshot,
+                MarketSnapshot,
+                PriceContext,
+                BorrowChange | None,
+                BorrowChange | None,
+                AnomalyEvent | None,
+            ]
+        ] = []
+        for symbol, borrow in latest_borrow.items():
+            market = latest_market.get(symbol)
+            if market is None:
+                continue
+            price = analyze_price_context(
+                candle_history.get(symbol, []), borrow.source_timestamp
+            )
+            if price.scenario not in {"POST_PUMP_BORROW", "DURING_PUMP_BORROW"}:
+                continue
+            strength = max(
+                price.price_change_1h or Decimal("0"),
+                price.price_change_4h or Decimal("0"),
+            )
+            watches.append(
+                (
+                    strength,
+                    symbol,
+                    borrow,
+                    market,
+                    price,
+                    calculate_borrow_change(
+                        borrow_history.get(symbol, []), borrow, minutes=3
+                    ),
+                    calculate_borrow_change(
+                        borrow_history.get(symbol, []), borrow, minutes=15
+                    ),
+                    latest_event.get(symbol),
+                )
+            )
+
+        lines = [
+            "👀 WATCH — АКТИВНІ ПАМПИ",
+            f"Оновлення: {self._format_time(latest_source_at)}",
+            "",
+        ]
+        if not watches:
+            lines.extend(
+                [
+                    "Зараз немає монет, що виконують поріг пампу:",
+                    "1h ≥5% або 4h ≥10%.",
+                ]
+            )
+            return "\n".join(lines)
+
+        for _strength, symbol, borrow, market, price, change_3m, change_15m, event in sorted(
+            watches, key=lambda item: item[0], reverse=True
+        ):
+            lines.extend(
+                [
+                    f"🪙 {symbol} — {self._pump_label(price)}",
+                    f"Price ${compact_number(market.price)} | "
+                    f"1h {self._percent(price.price_change_1h)} | "
+                    f"4h {self._percent(price.price_change_4h)}",
+                    f"BOR ${compact_number(borrow.borrow_usd)} | "
+                    f"B/R {compact_number(borrow.borrow_repay_ratio)}",
+                    f"ΔBOR 3m {self._format_borrow_change(change_3m)} | "
+                    f"15m {self._format_borrow_change(change_15m)}",
+                    (
+                        f"BOR anomaly: ✅ score {event.anomaly_score:.1f}/100"
+                        if event is not None
+                        else "BOR anomaly: ⏳ не підтверджено"
+                    ),
+                    "",
+                ]
+            )
+        lines.append("WATCH ≠ готовий short. Чекаємо BOR або розворот ціни.")
         return "\n".join(lines)
 
     @staticmethod
