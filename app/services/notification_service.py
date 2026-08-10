@@ -767,6 +767,8 @@ class TelegramNotificationService:
         return {
             "POST_PUMP_BORROW": "🔥 PUMP біля 4h high",
             "DURING_PUMP_BORROW": "⚠️ PUMP / відкат",
+            "BOUNCE_AFTER_DUMP": "↗️ відскок після дампу",
+            "LATE_PUMP_DISCOVERY": "⌛ старий памп / запізно",
             "NO_PUMP": "NO PUMP",
         }.get(price.scenario, "UNKNOWN")
 

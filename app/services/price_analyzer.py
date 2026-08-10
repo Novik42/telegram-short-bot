@@ -19,6 +19,8 @@ class PriceContext:
     pump_from_low_1h: Decimal | None = None
     pump_from_low_4h: Decimal | None = None
     pump_from_low_24h: Decimal | None = None
+    high_4h: Decimal | None = None
+    drawdown_from_high_4h_pct: Decimal | None = None
     near_local_high_4h: bool | None = None
     scenario: str = "UNKNOWN"
 
@@ -52,6 +54,8 @@ def analyze_price_context(
     *,
     pump_1h_threshold: Decimal = Decimal("5"),
     pump_4h_threshold: Decimal = Decimal("10"),
+    max_fresh_pump_drawdown_pct: Decimal = Decimal("8"),
+    bounce_after_dump_4h_pct: Decimal = Decimal("-10"),
 ) -> PriceContext:
     ordered = sorted(candles, key=lambda candle: candle.open_time)
     signal_candle = _nearest_start(ordered, signal_at)
@@ -65,13 +69,35 @@ def analyze_price_context(
 
     windows = {minutes: _window(ordered, signal_at, minutes) for minutes in (60, 240, 1440)}
     high_4h = max((candle.high for candle in windows[240]), default=None)
+    drawdown_4h = (
+        (high_4h - current) / high_4h * PERCENT
+        if high_4h is not None and high_4h > 0
+        else None
+    )
     near_high = current >= high_4h * Decimal("0.98") if high_4h else None
     change_1h = change(60)
     change_4h = change(240)
-    if (
+    raw_pump = (
         (change_1h is not None and change_1h >= pump_1h_threshold)
         or (change_4h is not None and change_4h >= pump_4h_threshold)
-    ):
+    )
+    bounce_after_dump = bool(
+        raw_pump
+        and change_1h is not None
+        and change_1h >= pump_1h_threshold
+        and change_4h is not None
+        and change_4h <= bounce_after_dump_4h_pct
+    )
+    late_discovery = bool(
+        raw_pump
+        and drawdown_4h is not None
+        and drawdown_4h > max_fresh_pump_drawdown_pct
+    )
+    if bounce_after_dump:
+        scenario = "BOUNCE_AFTER_DUMP"
+    elif late_discovery:
+        scenario = "LATE_PUMP_DISCOVERY"
+    elif raw_pump:
         scenario = "POST_PUMP_BORROW" if near_high else "DURING_PUMP_BORROW"
     else:
         scenario = "NO_PUMP"
@@ -90,7 +116,8 @@ def analyze_price_context(
         pump_from_low_24h=pump_from_local_low(
             [candle.low for candle in windows[1440]], current
         ),
+        high_4h=high_4h,
+        drawdown_from_high_4h_pct=drawdown_4h,
         near_local_high_4h=near_high,
         scenario=scenario,
     )
-

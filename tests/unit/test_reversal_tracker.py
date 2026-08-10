@@ -22,7 +22,7 @@ def _candle(start: datetime, *, high: str, low: str, close: str) -> Candle:
     )
 
 
-def test_three_percent_drawdown_creates_reversal_warning() -> None:
+def test_drawdown_alone_does_not_create_reversal_warning() -> None:
     now = datetime(2026, 8, 9, 18, 30, tzinfo=UTC)
     candles = [
         _candle(
@@ -43,9 +43,49 @@ def test_three_percent_drawdown_creates_reversal_warning() -> None:
         warning_support=None,
     )
 
-    assert result.warning is True
+    assert result.warning is False
     assert result.confirmed is False
     assert result.drawdown_pct == Decimal("3.500")
+
+
+def test_break_of_upper_structure_creates_warning_before_confirmation() -> None:
+    start = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
+    candles = [
+        _candle(start, high="240", low="232", close="237"),
+        _candle(start + timedelta(minutes=5), high="238", low="224", close="230"),
+        _candle(start + timedelta(minutes=10), high="235", low="228", close="233"),
+        _candle(start + timedelta(minutes=15), high="234", low="226", close="229"),
+        _candle(start + timedelta(minutes=20), high="230", low="220", close="222"),
+    ]
+
+    warning = analyze_reversal(
+        candles,
+        evaluated_at=start + timedelta(minutes=25),
+        current_price=Decimal("222"),
+        previous_peak=Decimal("240"),
+        warning_at=None,
+        warning_support=None,
+    )
+
+    assert warning.support_price == Decimal("224")
+    assert warning.support_break is True
+    assert warning.warning is True
+    assert warning.confirmed is False
+
+    failed_reclaim = _candle(
+        start + timedelta(minutes=25), high="224", low="218", close="221"
+    )
+    confirmation = analyze_reversal(
+        [*candles, failed_reclaim],
+        evaluated_at=start + timedelta(minutes=30),
+        current_price=Decimal("221"),
+        previous_peak=Decimal("240"),
+        warning_at=warning.latest_closed_at,
+        warning_support=warning.support_price,
+    )
+
+    assert confirmation.confirmed is True
+    assert "next_5m_close_failed_to_reclaim_support" in confirmation.reasons
 
 
 def test_next_close_below_warning_support_confirms_reversal() -> None:

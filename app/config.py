@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     min_net_borrow_delta_usd: Decimal = Decimal("75000")
     min_price_pump_1h_pct: Decimal = Decimal("5")
     min_price_pump_4h_pct: Decimal = Decimal("10")
+    max_fresh_pump_drawdown_pct: Decimal = Decimal("8")
+    bounce_after_dump_4h_pct: Decimal = Decimal("-10")
     min_volume_spike_ratio: Decimal = Decimal("1.5")
     min_anomaly_score: Decimal = Decimal("60")
     safe_repay_epsilon_usd: Decimal = Decimal("100")
@@ -69,6 +71,7 @@ class Settings(BaseSettings):
     reversal_confirm_drawdown_pct: Decimal = Decimal("5")
     reversal_support_lookback_candles: int = Field(default=4, ge=2, le=12)
     reversal_lower_high_drop_pct: Decimal = Decimal("0.5")
+    reversal_top_zone_depth_pct: Decimal = Decimal("8")
     high_cap_excluded_symbols: str = (
         "AAVE,ADA,APT,AVAX,BCH,BNB,BTC,CRO,DOGE,DOT,ETC,ETH,HBAR,ICP,"
         "LINK,LTC,NEAR,PAXG,PEPE,POL,SHIB,SOL,SUI,TAO,TON,TRX,UNI,XLM,XRP"

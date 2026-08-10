@@ -70,6 +70,39 @@ def _has_lower_high(candles: list[Candle], *, minimum_drop_pct: Decimal) -> bool
     return pivots[-1] <= pivots[-2] * (Decimal("1") - minimum_drop_pct / PERCENT)
 
 
+def _primary_structure_support(
+    candles: list[Candle],
+    *,
+    peak_price: Decimal,
+    lookback_candles: int,
+    top_zone_depth_pct: Decimal,
+) -> Decimal | None:
+    """Return the latest confirmed 5m swing low inside the pump's top zone.
+
+    The newest candle is excluded because it is the candle being tested for a
+    break. A pivot needs a candle on both sides, so the level is available
+    without using future data.
+    """
+    if len(candles) < lookback_candles + 1 or peak_price <= 0:
+        return None
+    reference = candles[:-1]
+    top_zone_floor = peak_price * (
+        Decimal("1") - top_zone_depth_pct / PERCENT
+    )
+    pivots: list[Decimal] = []
+    for index in range(1, len(reference) - 1):
+        previous = reference[index - 1].low
+        current = reference[index].low
+        following = reference[index + 1].low
+        if current <= previous and current < following and current >= top_zone_floor:
+            pivots.append(current)
+    if pivots:
+        return pivots[-1]
+
+    fallback = min(candle.low for candle in reference[-lookback_candles:])
+    return fallback if fallback >= top_zone_floor else None
+
+
 def analyze_reversal(
     candles: list[Candle],
     *,
@@ -82,6 +115,7 @@ def analyze_reversal(
     confirm_drawdown_pct: Decimal = Decimal("5"),
     support_lookback_candles: int = 4,
     lower_high_drop_pct: Decimal = Decimal("0.5"),
+    top_zone_depth_pct: Decimal = Decimal("8"),
 ) -> ReversalAnalysis:
     closed = _closed_candles(candles, evaluated_at)
     latest = closed[-1] if closed else None
@@ -92,22 +126,24 @@ def analyze_reversal(
         (peak - current_price) / peak * PERCENT if peak > 0 else Decimal("0")
     )
 
-    support: Decimal | None = None
-    if len(closed) >= support_lookback_candles + 1:
-        support = min(
-            candle.low for candle in closed[-(support_lookback_candles + 1) : -1]
-        )
+    support = _primary_structure_support(
+        closed,
+        peak_price=peak,
+        lookback_candles=support_lookback_candles,
+        top_zone_depth_pct=top_zone_depth_pct,
+    )
     support_break = bool(latest and support is not None and latest.close < support)
     lower_high = _has_lower_high(closed[-24:], minimum_drop_pct=lower_high_drop_pct)
 
     reasons: list[str] = []
-    if drawdown >= warning_drawdown_pct:
+    drawdown_warning = drawdown >= warning_drawdown_pct
+    if drawdown_warning:
         reasons.append(f"drawdown_from_peak_gte_{warning_drawdown_pct}")
     if support_break:
         reasons.append("closed_5m_below_local_support")
     if lower_high:
         reasons.append("confirmed_lower_high")
-    warning = bool(reasons)
+    warning = support_break or (drawdown_warning and lower_high)
 
     failed_reclaim = False
     if latest and warning_at and warning_support is not None:
@@ -115,12 +151,13 @@ def analyze_reversal(
             _as_utc(latest.close_time) > _as_utc(warning_at)
             and latest.close < warning_support
         )
-    extreme_break = drawdown >= confirm_drawdown_pct and support_break
-    confirmed = failed_reclaim or extreme_break
+    confirmed = failed_reclaim
     if failed_reclaim:
         reasons.append("next_5m_close_failed_to_reclaim_support")
-    elif extreme_break:
-        reasons.append(f"drawdown_gte_{confirm_drawdown_pct}_with_support_break")
+        if drawdown >= confirm_drawdown_pct:
+            reasons.append(
+                f"drawdown_gte_{confirm_drawdown_pct}_with_failed_reclaim"
+            )
 
     return ReversalAnalysis(
         peak_price=peak,
@@ -239,6 +276,10 @@ class ReversalTracker:
                     evaluated_at,
                     pump_1h_threshold=self.settings.min_price_pump_1h_pct,
                     pump_4h_threshold=self.settings.min_price_pump_4h_pct,
+                    max_fresh_pump_drawdown_pct=(
+                        self.settings.max_fresh_pump_drawdown_pct
+                    ),
+                    bounce_after_dump_4h_pct=self.settings.bounce_after_dump_4h_pct,
                 )
                 key = (symbol, borrow.source_name)
                 watch = active.get(key)
@@ -294,6 +335,7 @@ class ReversalTracker:
                     confirm_drawdown_pct=self.settings.reversal_confirm_drawdown_pct,
                     support_lookback_candles=self.settings.reversal_support_lookback_candles,
                     lower_high_drop_pct=self.settings.reversal_lower_high_drop_pct,
+                    top_zone_depth_pct=self.settings.reversal_top_zone_depth_pct,
                 )
                 previous_peak = watch.peak_price
                 watch.last_evaluated_at = evaluated_at
@@ -456,6 +498,16 @@ class ReversalTracker:
                 "price_change_4h": (
                     str(price_context.price_change_4h)
                     if price_context.price_change_4h is not None
+                    else None
+                ),
+                "high_4h": (
+                    str(price_context.high_4h)
+                    if price_context.high_4h is not None
+                    else None
+                ),
+                "drawdown_from_high_4h_pct": (
+                    str(price_context.drawdown_from_high_4h_pct)
+                    if price_context.drawdown_from_high_4h_pct is not None
                     else None
                 ),
             },

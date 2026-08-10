@@ -83,6 +83,67 @@ def test_price_context_detects_post_pump_near_high() -> None:
     assert context.scenario == "POST_PUMP_BORROW"
 
 
+def test_one_hour_bounce_inside_four_hour_dump_is_not_a_new_pump() -> None:
+    signal = datetime(2026, 8, 10, 8, 20, tzinfo=UTC)
+    closes = [
+        Decimal("0.205"),
+        Decimal("0.220"),
+        Decimal("0.237"),
+        Decimal("0.225"),
+        Decimal("0.210"),
+        Decimal("0.195"),
+        Decimal("0.180"),
+        Decimal("0.158"),
+        Decimal("0.155"),
+        Decimal("0.157"),
+        Decimal("0.160"),
+        Decimal("0.163"),
+        Decimal("0.166"),
+    ]
+    candles = [
+        _candle(
+            signal - timedelta(minutes=(240 - index * 20)),
+            str(close),
+            str(close * Decimal("0.99")),
+            str(close * Decimal("1.01")),
+            "100000",
+        )
+        for index, close in enumerate(closes)
+    ]
+
+    context = analyze_price_context(candles, signal)
+
+    assert context.price_change_1h is not None
+    assert context.price_change_1h >= Decimal("5")
+    assert context.price_change_4h is not None
+    assert context.price_change_4h <= Decimal("-10")
+    assert context.drawdown_from_high_4h_pct is not None
+    assert context.drawdown_from_high_4h_pct > Decimal("20")
+    assert context.scenario == "BOUNCE_AFTER_DUMP"
+
+
+def test_pump_far_below_recent_high_is_late_discovery() -> None:
+    signal = datetime(2026, 8, 10, 8, 20, tzinfo=UTC)
+    closes = [Decimal("100"), Decimal("125"), Decimal("115"), Decimal("112")]
+    candles = [
+        _candle(
+            signal - timedelta(minutes=(60 - index * 20)),
+            str(close),
+            str(close * Decimal("0.99")),
+            str(close * Decimal("1.01")),
+            "100000",
+        )
+        for index, close in enumerate(closes)
+    ]
+
+    context = analyze_price_context(candles, signal)
+
+    assert context.price_change_1h == Decimal("12.00")
+    assert context.drawdown_from_high_4h_pct is not None
+    assert context.drawdown_from_high_4h_pct > Decimal("8")
+    assert context.scenario == "LATE_PUMP_DISCOVERY"
+
+
 def test_price_change_and_pump_from_low() -> None:
     assert price_change(Decimal("100"), Decimal("130")) == Decimal("30.0")
     assert pump_from_local_low([Decimal("90"), Decimal("80")], Decimal("100")) == Decimal(
@@ -124,4 +185,3 @@ def test_volume_context_and_combined_score() -> None:
     assert volume.volume_15m == Decimal("900000")
     assert volume.volume_spike_ratio == Decimal("3")
     assert score.total >= Decimal("60")
-

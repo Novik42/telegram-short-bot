@@ -217,6 +217,10 @@ class AnomalyDetector:
                 signal_at,
                 pump_1h_threshold=self.settings.min_price_pump_1h_pct,
                 pump_4h_threshold=self.settings.min_price_pump_4h_pct,
+                max_fresh_pump_drawdown_pct=(
+                    self.settings.max_fresh_pump_drawdown_pct
+                ),
+                bounce_after_dump_4h_pct=self.settings.bounce_after_dump_4h_pct,
             )
             volume = analyze_volume_context(candles, signal_at, metrics.borrow_delta)
             score = calculate_anomaly_score(
