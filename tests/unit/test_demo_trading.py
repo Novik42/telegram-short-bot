@@ -97,10 +97,28 @@ async def test_risk_sizing_is_one_percent_and_leverage_only_caps_notional(tmp_pa
     )
 
     assert stop == Decimal("1.005")
-    assert quantity == Decimal("190.0")
-    assert risk == Decimal("4.7500")
-    assert notional == Decimal("186.200")
-    assert margin == Decimal("37.240")
+    assert quantity == Decimal("173.0")
+    assert risk == Decimal("4.748850")
+    assert notional == Decimal("169.540")
+    assert margin == Decimal("33.908")
+    await engine.dispose()
+
+
+async def test_risk_sizing_reserves_for_adverse_market_fill(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'slippage.db'}")
+    service = DemoTradingService(AsyncMock(), async_sessionmaker(engine), demo_settings())
+
+    quantity, stop, risk, _notional, _margin = service._calculate_order(
+        price=Decimal("0.98"),
+        entry_reference=Decimal("0.979"),
+        support=Decimal("1"),
+        balance=Decimal("500"),
+        instrument=instrument(),
+    )
+    conservative_fill = Decimal("0.979") * Decimal("0.9975")
+
+    assert risk == quantity * (stop - conservative_fill)
+    assert risk <= Decimal("4.75")
     await engine.dispose()
 
 
@@ -209,6 +227,7 @@ async def test_unknown_create_response_is_reconciled_by_order_link_id(tmp_path) 
         0,
     )
     client.emergency_close_short.return_value = BybitOrderAck("emergency-close", "emergency-link")
+    client.wait_for_position_closed.return_value = True
     service = DemoTradingService(client, async_sessionmaker(engine), demo_settings())
     service._update_trade = AsyncMock(return_value="updated")
 
@@ -227,4 +246,5 @@ async def test_unknown_create_response_is_reconciled_by_order_link_id(tmp_path) 
     )
     client.emergency_close_short.assert_awaited_once()
     assert service._update_trade.await_args.kwargs["status"] == "EMERGENCY_CLOSED"
+    assert service._update_trade.await_args.kwargs["closed_at"] is not None
     await engine.dispose()

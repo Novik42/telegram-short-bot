@@ -396,6 +396,16 @@ class BybitDemoClient:
             await asyncio.sleep(0.5)
         return None
 
+    async def wait_for_position_closed(
+        self, symbol: str, *, timeout_seconds: float = 10.0
+    ) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if await self.get_position(symbol) is None:
+                return True
+            await asyncio.sleep(0.5)
+        return False
+
     async def get_latest_closed_pnl(self, symbol: str) -> dict[str, Any] | None:
         data = await self._request(
             "GET",

@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     bybit_base_url: str = "https://api-demo.bybit.com"
     demo_leverage: int = Field(default=5, ge=1, le=10)
     demo_risk_percent: Decimal = Field(default=Decimal("1"), gt=0, le=2)
+    demo_entry_slippage_buffer_pct: Decimal = Field(
+        default=Decimal("0.25"), ge=Decimal("0.05"), le=Decimal("1")
+    )
     demo_max_open_positions: int = Field(default=1, ge=1, le=1)
     demo_signal_max_age_seconds: int = Field(default=300, ge=30, le=600)
     demo_proposal_ttl_seconds: int = Field(default=120, ge=30, le=300)

@@ -18,6 +18,7 @@ from app.providers.bybit_demo import (
     BybitDemoClient,
     BybitInstrument,
     BybitPosition,
+    BybitTicker,
 )
 from app.utils.datetime import utc_now
 
@@ -160,6 +161,7 @@ class DemoTradingService:
             self._validate_price(price, Decimal(transition.price))
             quantity, stop_loss, risk, notional, margin = self._calculate_order(
                 price=price,
+                entry_reference=self._entry_reference(ticker),
                 support=Decimal(support),
                 balance=balance.available_balance,
                 instrument=instrument,
@@ -198,6 +200,9 @@ class DemoTradingService:
                         "category": "linear",
                         "trigger": "SHORT_CONFIRMED",
                         "max_price_deviation_pct": str(self.settings.demo_max_price_deviation_pct),
+                        "entry_slippage_buffer_pct": str(
+                            self.settings.demo_entry_slippage_buffer_pct
+                        ),
                     },
                 }
                 if trade is None:
@@ -310,6 +315,7 @@ class DemoTradingService:
                     raise DemoTradingError("На Bybit Demo вже є відкрита позиція")
                 quantity, stop_loss, risk, notional, margin = self._calculate_order(
                     price=ticker.mark_price,
+                    entry_reference=self._entry_reference(ticker),
                     support=Decimal(trade.support_price),
                     balance=balance.available_balance,
                     instrument=instrument,
@@ -357,14 +363,24 @@ class DemoTradingService:
                 maximum_risk = (
                     balance.available_balance * self.settings.demo_risk_percent / Decimal("100")
                 )
+                actual_notional = position.size * position.average_price
+                actual_margin = actual_notional / Decimal(trade.leverage)
+                filled_at = utc_now()
+                await self._update_trade(
+                    trade.id,
+                    entry_price=position.average_price,
+                    quantity=position.size,
+                    risk_usd=actual_risk,
+                    notional_usd=actual_notional,
+                    margin_usd=actual_margin,
+                    filled_at=filled_at,
+                    updated_at=filled_at,
+                )
                 if actual_risk > maximum_risk:
                     raise DemoTradingError(
                         f"Фактичний ризик після fill ${actual_risk:.2f} "
                         f"перевищив ліміт ${maximum_risk:.2f}"
                     )
-                actual_notional = position.size * position.average_price
-                actual_margin = actual_notional / Decimal(trade.leverage)
-                filled_at = utc_now()
                 return await self._update_trade(
                     trade.id,
                     status="OPEN",
@@ -427,6 +443,7 @@ class DemoTradingService:
         message = self._safe_error(exc)
         status = "FAILED"
         close_order_id = None
+        closed_at = None
         if order_attempted:
             try:
                 order_id = str(getattr(order_ack, "order_id", ""))
@@ -451,8 +468,18 @@ class DemoTradingService:
                         symbol, position.size, close_link_id
                     )
                     close_order_id = close_ack.order_id
-                    status = "EMERGENCY_CLOSED"
-                    message = f"{message}; позицію аварійно закрито через відсутність захисту"
+                    if await self.client.wait_for_position_closed(symbol):
+                        status = "EMERGENCY_CLOSED"
+                        closed_at = utc_now()
+                        message = (
+                            f"{message}; аварійне закриття підтверджено risk-guard"
+                        )
+                    else:
+                        status = "UNPROTECTED_ERROR"
+                        message = (
+                            f"{message}; emergency close надіслано, але фактичне "
+                            "закриття не підтверджено — перевірте Bybit Demo вручну"
+                        )
                 elif order_status is None:
                     status = "UNPROTECTED_ERROR"
                     message = (
@@ -474,6 +501,7 @@ class DemoTradingService:
             trade_id,
             status=status,
             close_order_id=close_order_id,
+            closed_at=closed_at,
             error_message=message,
             updated_at=utc_now(),
         )
@@ -554,6 +582,7 @@ class DemoTradingService:
         support: Decimal,
         balance: Decimal,
         instrument: BybitInstrument,
+        entry_reference: Decimal | None = None,
     ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal]:
         if price <= 0 or support <= price:
             raise DemoTradingError("Ціна вже повернула підтримку або support некоректний")
@@ -571,7 +600,12 @@ class DemoTradingService:
             raise DemoTradingError(f"Stop-loss занадто далекий ({distance:.2f}%), угоду пропущено")
         target_risk = balance * self.settings.demo_risk_percent / Decimal("100")
         risk_budget = target_risk * Decimal("0.95")
-        risk_quantity = risk_budget / (stop_loss - price)
+        reference = entry_reference if entry_reference and entry_reference > 0 else price
+        conservative_entry = min(price, reference) * (
+            Decimal("1")
+            - self.settings.demo_entry_slippage_buffer_pct / Decimal("100")
+        )
+        risk_quantity = risk_budget / (stop_loss - conservative_entry)
         notional_cap = balance * Decimal(self.settings.demo_leverage) * Decimal("0.95")
         cap_quantity = notional_cap / price
         quantity = floor_to_step(min(risk_quantity, cap_quantity), instrument.qty_step)
@@ -583,11 +617,17 @@ class DemoTradingService:
         notional = quantity * price
         if notional < instrument.min_notional:
             raise DemoTradingError("Розмір позиції нижчий мінімального notional Bybit")
-        risk = quantity * (stop_loss - price)
+        risk = quantity * (stop_loss - conservative_entry)
         margin = notional / Decimal(self.settings.demo_leverage)
         if margin > balance:
             raise DemoTradingError("Недостатньо демо-балансу для розрахованої маржі")
         return quantity, stop_loss, risk, notional, margin
+
+    @staticmethod
+    def _entry_reference(ticker: BybitTicker) -> Decimal:
+        if ticker.bid_price > 0:
+            return min(ticker.mark_price, ticker.bid_price)
+        return ticker.mark_price
 
     @staticmethod
     def _validate_open_short(position: BybitPosition) -> None:

@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 from pydantic import ValidationError
 
@@ -58,3 +60,4 @@ def test_demo_mode_accepts_only_demo_credentials_and_defaults() -> None:
     assert settings.demo_trading_enabled is True
     assert settings.demo_leverage == 5
     assert settings.demo_risk_percent == 1
+    assert settings.demo_entry_slippage_buffer_pct == Decimal("0.25")
