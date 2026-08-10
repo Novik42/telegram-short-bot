@@ -8,8 +8,10 @@ from app.providers.base import BorrowDataProvider
 from app.providers.binance_spot import BinanceMarketDataProvider
 from app.providers.borrow_bbm import BbmBorrowProvider
 from app.providers.borrow_fixture import FixtureBorrowProvider
+from app.providers.bybit_demo import BybitDemoClient
 from app.services.anomaly_detector import AnomalyDetector
 from app.services.collector import Collector
+from app.services.demo_trading import DemoTradingService
 from app.services.outcome_evaluator import OutcomeEvaluator
 from app.services.reversal_tracker import ReversalTracker
 from app.services.watch_market_updater import WatchMarketUpdater
@@ -25,10 +27,14 @@ class Runtime:
     outcome_evaluator: OutcomeEvaluator
     reversal_tracker: ReversalTracker
     watch_market_updater: WatchMarketUpdater
+    bybit_client: BybitDemoClient | None = None
+    demo_trading: DemoTradingService | None = None
 
     async def close(self) -> None:
         await self.borrow_provider.aclose()
         await self.market_provider.aclose()
+        if self.bybit_client is not None:
+            await self.bybit_client.aclose()
         await self.engine.dispose()
 
 
@@ -55,6 +61,18 @@ def build_runtime(settings: Settings) -> Runtime:
         exchange_info_cache_minutes=settings.binance_exchange_info_cache_minutes,
     )
     anomaly_detector = AnomalyDetector(session_factory, settings)
+    bybit_client: BybitDemoClient | None = None
+    demo_trading: DemoTradingService | None = None
+    if settings.demo_trading_enabled:
+        assert settings.bybit_api_key is not None
+        assert settings.bybit_api_secret is not None
+        bybit_client = BybitDemoClient(
+            settings.bybit_api_key.get_secret_value(),
+            settings.bybit_api_secret.get_secret_value(),
+            base_url=settings.bybit_base_url,
+            timeout=settings.http_timeout_seconds,
+        )
+        demo_trading = DemoTradingService(bybit_client, session_factory, settings)
     return Runtime(
         engine=engine,
         session_factory=session_factory,
@@ -68,7 +86,7 @@ def build_runtime(settings: Settings) -> Runtime:
         ),
         outcome_evaluator=OutcomeEvaluator(session_factory, market_provider),
         reversal_tracker=ReversalTracker(session_factory, settings),
-        watch_market_updater=WatchMarketUpdater(
-            market_provider, session_factory, settings
-        ),
+        watch_market_updater=WatchMarketUpdater(market_provider, session_factory, settings),
+        bybit_client=bybit_client,
+        demo_trading=demo_trading,
     )

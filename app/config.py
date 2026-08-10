@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     )
 
     app_env: str = "development"
-    database_url: str = "postgresql+asyncpg://margin_monitor:margin_monitor@localhost:5432/margin_monitor"
+    database_url: str = (
+        "postgresql+asyncpg://margin_monitor:margin_monitor@localhost:5432/margin_monitor"
+    )
     log_level: str = "INFO"
 
     borrow_provider: Literal["fixture", "http_json", "html", "manual"] = "fixture"
@@ -50,6 +52,22 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    telegram_authorized_user_id: int | None = None
+
+    # Semi-automatic trading is fail-closed and supports Bybit Demo only.
+    trading_mode: Literal["disabled", "demo"] = "disabled"
+    bybit_api_key: SecretStr | None = None
+    bybit_api_secret: SecretStr | None = None
+    bybit_base_url: str = "https://api-demo.bybit.com"
+    demo_leverage: int = Field(default=5, ge=1, le=10)
+    demo_risk_percent: Decimal = Field(default=Decimal("1"), gt=0, le=2)
+    demo_max_open_positions: int = Field(default=1, ge=1, le=1)
+    demo_signal_max_age_seconds: int = Field(default=180, ge=30, le=600)
+    demo_proposal_ttl_seconds: int = Field(default=90, ge=30, le=300)
+    demo_max_price_deviation_pct: Decimal = Field(default=Decimal("1"), gt=0, le=3)
+    demo_stop_buffer_pct: Decimal = Field(default=Decimal("0.5"), ge=0, le=2)
+    demo_min_stop_distance_pct: Decimal = Field(default=Decimal("1"), gt=0, le=5)
+    demo_max_stop_distance_pct: Decimal = Field(default=Decimal("8"), gt=1, le=20)
 
     min_borrow_delta_usd: Decimal = Decimal("100000")
     min_borrow_delta_pct: Decimal = Decimal("30")
@@ -89,7 +107,15 @@ class Settings(BaseSettings):
             if symbol.strip()
         )
 
-    @field_validator("borrow_json_url", "borrow_html_url", mode="before")
+    @field_validator(
+        "borrow_json_url",
+        "borrow_html_url",
+        "telegram_bot_token",
+        "telegram_chat_id",
+        "bybit_api_key",
+        "bybit_api_secret",
+        mode="before",
+    )
     @classmethod
     def empty_string_to_none(cls, value: object) -> object:
         return None if value == "" else value
@@ -105,6 +131,24 @@ class Settings(BaseSettings):
         if value.startswith("postgresql://"):
             return value.replace("postgresql://", "postgresql+asyncpg://", 1)
         return value
+
+    @model_validator(mode="after")
+    def validate_demo_trading(self) -> Settings:
+        if self.trading_mode == "disabled":
+            return self
+        if self.bybit_base_url.rstrip("/") != "https://api-demo.bybit.com":
+            raise ValueError("TRADING_MODE=demo requires https://api-demo.bybit.com")
+        if not self.bybit_api_key or not self.bybit_api_key.get_secret_value():
+            raise ValueError("BYBIT_API_KEY is required when TRADING_MODE=demo")
+        if not self.bybit_api_secret or not self.bybit_api_secret.get_secret_value():
+            raise ValueError("BYBIT_API_SECRET is required when TRADING_MODE=demo")
+        if self.demo_min_stop_distance_pct >= self.demo_max_stop_distance_pct:
+            raise ValueError("demo minimum stop distance must be below maximum")
+        return self
+
+    @property
+    def demo_trading_enabled(self) -> bool:
+        return self.trading_mode == "demo"
 
 
 @lru_cache

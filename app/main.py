@@ -37,9 +37,10 @@ async def run() -> None:
             runtime.session_factory,
             configured_chat_id=settings.telegram_chat_id,
             excluded_symbols=settings.high_cap_excluded_symbol_set,
+            demo_trading_enabled=settings.demo_trading_enabled,
         )
         dispatcher = Dispatcher()
-        dispatcher.include_router(build_router(notifier))
+        dispatcher.include_router(build_router(notifier, runtime.demo_trading))
         polling_task = asyncio.create_task(
             dispatcher.start_polling(bot, handle_signals=False), name="telegram-polling"
         )
@@ -54,6 +55,14 @@ async def run() -> None:
             await notifier.notify_collection(result)
             await notifier.notify_anomalies(result.anomaly_event_ids)
             await notifier.notify_reversal_transitions()
+        if runtime.demo_trading is not None:
+            try:
+                trade_updates = await runtime.demo_trading.sync_open_trades()
+            except Exception as exc:
+                log.error("demo_trade_sync_failed", error=str(exc))
+            else:
+                if notifier is not None:
+                    await notifier.notify_trade_updates(trade_updates)
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(

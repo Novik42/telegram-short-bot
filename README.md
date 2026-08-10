@@ -1,8 +1,9 @@
 # Margin Anomaly Monitor
 
 Асинхронний Python-сервіс для дослідницького збору snapshot-ів маржинальних
-Borrow/Repay та незалежних публічних ринкових даних Binance. Проєкт не відкриває
-угод, не приймає торгових API-ключів і не використовує браузерну автоматизацію.
+Borrow/Repay та незалежних публічних ринкових даних Binance. Опційний
+напівавтоматичний модуль відкриває лише Bybit Demo SHORT після двох ручних
+підтверджень у Telegram; live Bybit endpoint кодом заборонений.
 
 ## Поточний обсяг: живий BBM + Binance + Telegram monitoring
 
@@ -43,6 +44,12 @@ Borrow/Repay та незалежних публічних ринкових да�
 - автоматичну оцінку кожного живого сигналу через 15 хв, 1 год, 4 год і 24 год;
 - збереження return, максимального руху на користь short (MFE), максимального руху
   проти short (MAE) та часу до локальних min/max.
+- fail-closed Bybit Demo adapter для `linear` USDT perpetual, 5× leverage,
+  ризику 1% актуального available balance та максимум однієї позиції;
+- двоетапний Telegram flow `Підготувати DEMO SHORT → Підтвердити вхід`, повторна
+  перевірка ціни/балансу/позицій і обов'язкове підтвердження stop-loss;
+- локальний журнал `demo_trades`, захист від повторного кліку/orderLinkId,
+  аварійне reduce-only закриття та фоновий контроль position/stop/P&L.
 
 Ще не реалізовано: generic JSON/manual Borrow providers, Futures provider та
 статистичне переналаштування порогів на достатній вибірці. Поточне живе
@@ -86,6 +93,7 @@ margin-anomaly-monitor/
 | `notification_log` | журнал майбутніх сповіщень | index `(anomaly_event_id, sent_at)` |
 | `pump_watches` | поточний стан кожного памп-епізоду | index `(status, expires_at)` |
 | `pump_watch_transitions` | features на кожному переході стану | index `(pump_watch_id, occurred_at)` |
+| `demo_trades` | життєвий цикл напівавтоматичної Bybit Demo угоди | unique transition та `order_link_id` |
 
 Усі часові колонки мають `timezone=True`; application timestamps нормалізуються в UTC.
 
@@ -208,6 +216,40 @@ Borrow/Market/Candle snapshots продовжують зберігатися, а
 anomaly/watch/reversal signals і приховані зі звичайного status. Це керований
 список, а не live market-cap рейтинг; його можна змінити в `.env` без коду.
 
+### Напівавтоматичний Bybit Demo SHORT
+
+Модуль за замовчуванням вимкнений (`TRADING_MODE=disabled`). Для нього потрібен
+окремий API key саме Bybit Demo з дозволами Contract `Order` і `Position`:
+
+```dotenv
+TRADING_MODE=demo
+BYBIT_API_KEY=
+BYBIT_API_SECRET=
+BYBIT_BASE_URL=https://api-demo.bybit.com
+DEMO_LEVERAGE=5
+DEMO_RISK_PERCENT=1
+DEMO_MAX_OPEN_POSITIONS=1
+```
+
+Кнопка підготовки з'являється лише біля нового `SHORT_CONFIRMED`. Бот відхиляє
+high-cap symbol, застарілий сигнал, ціну над пробитою підтримкою, занадто далекий
+stop, відхилення ціни понад поріг та будь-яку іншу локальну/Bybit позицію.
+Quantity визначається від максимальної втрати до stop-loss із 5% резервом на
+slippage, а плече лише обмежує потрібну маржу — воно не множить допустимий ризик.
+Після fill фактичний ризик перераховується; перевищення 1% запускає аварійне
+закриття.
+
+Перше натискання нічого не торгує: воно показує mark price, stop, quantity,
+notional, margin і ризик. Лише друге натискання створює Demo market SHORT.
+Відразу після цього бот читає Position API та перевіряє stop-loss. Якщо захист не
+підтверджено, надсилається reduce-only emergency close; невизначений стан ордера
+додатково звіряється за унікальним `orderLinkId`.
+
+Команда `/demo` або кнопка `🧪 DEMO` показує актуальний демобаланс, margin mode та
+локальні активні записи. Фоновий цикл контролює stop і фіксує закриття/P&L у
+`demo_trades`. Код не має live trading mode і не дозволяє змінити base URL на
+`https://api.bybit.com`.
+
 Примусовий одноразовий перерахунок усіх результатів, строк яких уже настав:
 
 ```bash
@@ -253,9 +295,11 @@ ORDER BY source_timestamp, symbol;
 ## Безпека
 
 - Не записуйте секрети у `.env.example` або Git.
-- Telegram інтеграція починається лише в Етапі 3; токен Етапу 1 не потрібен.
+- Не надсилайте API secret у Telegram або Notion; він читається лише з `.env`.
 - Binance provider не має параметрів для API key/secret і використовує лише public API.
-- Немає Playwright, Selenium, CAPTCHA bypass або торгових операцій.
+- Bybit adapter приймає тільки Demo host, `linear` USDT perpetual і не має
+  withdrawal/transfer функцій.
+- Немає Playwright, Selenium або CAPTCHA bypass.
 
 Порогові значення в `.env.example` є лише стартовими дослідницькими параметрами,
 а не перевіреною торговою стратегією.

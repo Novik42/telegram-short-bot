@@ -11,6 +11,7 @@ def test_stage_one_database_schema_contains_all_research_tables() -> None:
         "notification_log",
         "pump_watches",
         "pump_watch_transitions",
+        "demo_trades",
     }
 
 

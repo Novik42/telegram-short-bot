@@ -3,6 +3,7 @@ from app.models.borrow import BorrowSnapshot
 from app.models.database import Base
 from app.models.market import Candle, MarketSnapshot
 from app.models.notification import NotificationLog
+from app.models.trading import DemoTrade
 from app.models.watch import PumpWatch, PumpWatchTransition
 
 __all__ = [
@@ -10,6 +11,7 @@ __all__ = [
     "Base",
     "BorrowSnapshot",
     "Candle",
+    "DemoTrade",
     "EventOutcome",
     "MarketSnapshot",
     "NotificationLog",

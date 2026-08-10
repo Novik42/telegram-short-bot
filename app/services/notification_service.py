@@ -11,13 +11,14 @@ from aiogram.exceptions import TelegramAPIError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bot.keyboards import main_keyboard
+from app.bot.keyboards import main_keyboard, prepare_short_keyboard
 from app.models.anomaly import AnomalyEvent, EventOutcome
 from app.models.borrow import BorrowSnapshot
 from app.models.market import Candle, MarketSnapshot
 from app.models.watch import PumpWatch, PumpWatchTransition
 from app.services.borrow_change import BorrowChange, calculate_borrow_change
 from app.services.collector import CollectionResult
+from app.services.demo_trading import TradeUpdate
 from app.services.price_analyzer import PriceContext, analyze_price_context
 from app.utils.datetime import utc_now
 
@@ -47,11 +48,13 @@ class TelegramNotificationService:
         configured_chat_id: str | None = None,
         chat_id_file: Path = Path(".telegram_chat_id"),
         excluded_symbols: frozenset[str] = frozenset(),
+        demo_trading_enabled: bool = False,
     ) -> None:
         self.bot = bot
         self.session_factory = session_factory
         self.chat_id_file = chat_id_file
         self.excluded_symbols = excluded_symbols
+        self.demo_trading_enabled = demo_trading_enabled
         self.chat_id = self._initial_chat_id(configured_chat_id)
 
     def _initial_chat_id(self, configured_chat_id: str | None) -> int | None:
@@ -99,9 +102,7 @@ class TelegramNotificationService:
                 )
             ).all()
         for event in events:
-            if event.symbol in self.excluded_symbols or not self._should_notify_anomaly(
-                event
-            ):
+            if event.symbol in self.excluded_symbols or not self._should_notify_anomaly(event):
                 log.info(
                     "telegram_anomaly_suppressed_for_research",
                     event_id=event.id,
@@ -138,8 +139,7 @@ class TelegramNotificationService:
             for transition, watch in rows:
                 if transition.status == "WATCH" and (
                     not self._is_initial_pump_transition(transition)
-                    or self._as_utc(transition.occurred_at)
-                    < utc_now() - timedelta(minutes=15)
+                    or self._as_utc(transition.occurred_at) < utc_now() - timedelta(minutes=15)
                 ):
                     transition.notified_at = utc_now()
                     continue
@@ -152,10 +152,13 @@ class TelegramNotificationService:
                     )
                     continue
                 try:
+                    reply_markup = main_keyboard()
+                    if self.demo_trading_enabled and transition.status == "SHORT_CONFIRMED":
+                        reply_markup = prepare_short_keyboard(transition.id)
                     await self.bot.send_message(
                         self.chat_id,
                         self._format_reversal_transition(transition, watch),
-                        reply_markup=main_keyboard(),
+                        reply_markup=reply_markup,
                     )
                 except TelegramAPIError as exc:
                     log.error(
@@ -167,9 +170,24 @@ class TelegramNotificationService:
                 transition.notified_at = utc_now()
             await session.commit()
 
-    def _format_reversal_transition(
-        self, transition: PumpWatchTransition, watch: PumpWatch
-    ) -> str:
+    async def notify_trade_updates(self, updates: list[TradeUpdate]) -> None:
+        if self.chat_id is None:
+            return
+        for update in updates:
+            try:
+                await self.bot.send_message(
+                    self.chat_id,
+                    f"{update.text}\nTrade #{update.trade_id} · {update.symbol}",
+                    reply_markup=main_keyboard(),
+                )
+            except TelegramAPIError as exc:
+                log.error(
+                    "telegram_demo_trade_update_failed",
+                    trade_id=update.trade_id,
+                    error=str(exc),
+                )
+
+    def _format_reversal_transition(self, transition: PumpWatchTransition, watch: PumpWatch) -> str:
         reasons = transition.reason_json.get("reasons", []) if transition.reason_json else []
         reason_labels = {
             "closed_5m_below_local_support": "5m закрилась нижче локальної підтримки",
@@ -254,8 +272,7 @@ class TelegramNotificationService:
         actionable = [
             event
             for event in events
-            if event.symbol not in self.excluded_symbols
-            and self._should_notify_anomaly(event)
+            if event.symbol not in self.excluded_symbols and self._should_notify_anomaly(event)
         ]
         return [self._format_anomaly(event) for event in actionable[:limit]]
 
@@ -367,24 +384,19 @@ class TelegramNotificationService:
                     await session.scalars(
                         select(PumpWatch)
                         .where(
-                            PumpWatch.status.in_(
-                                ("WATCH", "REVERSAL_WARNING", "SHORT_CONFIRMED")
-                            )
+                            PumpWatch.status.in_(("WATCH", "REVERSAL_WARNING", "SHORT_CONFIRMED"))
                         )
                         .order_by(PumpWatch.started_at.desc())
                     )
                 ).all()
             )
-            watch_rows = [
-                row for row in watch_rows if row.symbol not in self.excluded_symbols
-            ]
+            watch_rows = [row for row in watch_rows if row.symbol not in self.excluded_symbols]
             borrow_rows = list(
                 (
                     await session.scalars(
                         select(BorrowSnapshot)
                         .where(
-                            BorrowSnapshot.source_timestamp
-                            >= latest_source_at - timedelta(hours=1)
+                            BorrowSnapshot.source_timestamp >= latest_source_at - timedelta(hours=1)
                         )
                         .order_by(
                             BorrowSnapshot.source_timestamp.desc(),
@@ -393,12 +405,9 @@ class TelegramNotificationService:
                     )
                 ).all()
             )
-            borrow_rows = [
-                row for row in borrow_rows if row.symbol not in self.excluded_symbols
-            ]
+            borrow_rows = [row for row in borrow_rows if row.symbol not in self.excluded_symbols]
             symbols = sorted(
-                {row.symbol for row in borrow_rows}
-                | {row.symbol for row in watch_rows}
+                {row.symbol for row in borrow_rows} | {row.symbol for row in watch_rows}
             )
             market_rows: list[MarketSnapshot] = []
             candle_rows: list[Candle] = []
@@ -423,8 +432,7 @@ class TelegramNotificationService:
                             .where(
                                 Candle.symbol.in_(symbols),
                                 Candle.interval == "5m",
-                                Candle.open_time
-                                >= latest_source_at - timedelta(hours=5),
+                                Candle.open_time >= latest_source_at - timedelta(hours=5),
                                 Candle.open_time <= latest_source_at,
                             )
                             .order_by(Candle.symbol, Candle.open_time)
@@ -437,8 +445,7 @@ class TelegramNotificationService:
                             select(AnomalyEvent)
                             .where(
                                 AnomalyEvent.symbol.in_(symbols),
-                                AnomalyEvent.detected_at
-                                >= latest_source_at - timedelta(hours=4),
+                                AnomalyEvent.detected_at >= latest_source_at - timedelta(hours=4),
                             )
                             .order_by(AnomalyEvent.detected_at.desc())
                         )
@@ -480,9 +487,7 @@ class TelegramNotificationService:
             market = latest_market.get(symbol)
             if market is None:
                 continue
-            price = analyze_price_context(
-                candle_history.get(symbol, []), borrow.source_timestamp
-            )
+            price = analyze_price_context(candle_history.get(symbol, []), borrow.source_timestamp)
             watch = latest_watch.get(symbol)
             if watch is None and price.scenario not in {
                 "POST_PUMP_BORROW",
@@ -500,12 +505,8 @@ class TelegramNotificationService:
                     borrow,
                     market,
                     price,
-                    calculate_borrow_change(
-                        borrow_history.get(symbol, []), borrow, minutes=3
-                    ),
-                    calculate_borrow_change(
-                        borrow_history.get(symbol, []), borrow, minutes=15
-                    ),
+                    calculate_borrow_change(borrow_history.get(symbol, []), borrow, minutes=3),
+                    calculate_borrow_change(borrow_history.get(symbol, []), borrow, minutes=15),
                     latest_event.get(symbol),
                     watch,
                 )
@@ -556,8 +557,7 @@ class TelegramNotificationService:
             )
             if watch is not None:
                 lines.append(
-                    f"Peak ${compact_number(watch.peak_price)} | "
-                    f"відкат -{watch.drawdown_pct:.2f}%"
+                    f"Peak ${compact_number(watch.peak_price)} | відкат -{watch.drawdown_pct:.2f}%"
                 )
                 if watch.support_price is not None:
                     lines.append(f"5m support ${compact_number(watch.support_price)}")
@@ -597,12 +597,8 @@ class TelegramNotificationService:
 
     async def render_status(self) -> str:
         async with self.session_factory() as session:
-            borrow_count = int(
-                await session.scalar(select(func.count(BorrowSnapshot.id))) or 0
-            )
-            market_count = int(
-                await session.scalar(select(func.count(MarketSnapshot.id))) or 0
-            )
+            borrow_count = int(await session.scalar(select(func.count(BorrowSnapshot.id))) or 0)
+            market_count = int(await session.scalar(select(func.count(MarketSnapshot.id))) or 0)
             latest_source_at = await session.scalar(
                 select(func.max(BorrowSnapshot.source_timestamp))
             )
@@ -632,18 +628,10 @@ class TelegramNotificationService:
             ).all()
 
             excluded_seen = sorted(
-                {
-                    row.symbol
-                    for row in borrow_rows
-                    if row.symbol in self.excluded_symbols
-                }
+                {row.symbol for row in borrow_rows if row.symbol in self.excluded_symbols}
             )
-            borrow_rows = [
-                row for row in borrow_rows if row.symbol not in self.excluded_symbols
-            ]
-            market_rows = [
-                row for row in market_rows if row.symbol not in self.excluded_symbols
-            ]
+            borrow_rows = [row for row in borrow_rows if row.symbol not in self.excluded_symbols]
+            market_rows = [row for row in market_rows if row.symbol not in self.excluded_symbols]
 
             symbols = sorted({row.symbol for row in borrow_rows})
             candle_rows: list[Candle] = []
@@ -655,8 +643,7 @@ class TelegramNotificationService:
                             .where(
                                 Candle.symbol.in_(symbols),
                                 Candle.interval == "5m",
-                                Candle.open_time
-                                >= latest_source_at - timedelta(hours=5),
+                                Candle.open_time >= latest_source_at - timedelta(hours=5),
                                 Candle.open_time <= latest_source_at,
                             )
                             .order_by(Candle.symbol, Candle.open_time)
@@ -713,9 +700,7 @@ class TelegramNotificationService:
                 )
             if market:
                 price = (
-                    analyze_price_context(
-                        candle_history.get(symbol, []), borrow.source_timestamp
-                    )
+                    analyze_price_context(candle_history.get(symbol, []), borrow.source_timestamp)
                     if borrow
                     else PriceContext()
                 )
@@ -748,11 +733,7 @@ class TelegramNotificationService:
     def _signed_money(value: Decimal | None) -> str:
         if value is None:
             return "n/a"
-        return (
-            f"+${compact_number(value)}"
-            if value >= 0
-            else f"-${compact_number(abs(value))}"
-        )
+        return f"+${compact_number(value)}" if value >= 0 else f"-${compact_number(abs(value))}"
 
     @staticmethod
     def _watch_state_label(watch: PumpWatch) -> str:
@@ -776,9 +757,7 @@ class TelegramNotificationService:
         async with self.session_factory() as session:
             live_events = int(
                 await session.scalar(
-                    select(func.count(AnomalyEvent.id)).where(
-                        AnomalyEvent.source_name != "fixture"
-                    )
+                    select(func.count(AnomalyEvent.id)).where(AnomalyEvent.source_name != "fixture")
                 )
                 or 0
             )

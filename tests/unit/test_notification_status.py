@@ -40,9 +40,7 @@ def test_calculate_borrow_change_uses_baseline_at_or_before_window() -> None:
 
 def test_status_labels_pump_and_formats_negative_delta() -> None:
     assert (
-        TelegramNotificationService._pump_label(
-            PriceContext(scenario="POST_PUMP_BORROW")
-        )
+        TelegramNotificationService._pump_label(PriceContext(scenario="POST_PUMP_BORROW"))
         == "🔥 PUMP біля 4h high"
     )
     assert (
@@ -56,7 +54,7 @@ def test_status_labels_pump_and_formats_negative_delta() -> None:
 def test_main_keyboard_contains_watch_and_reports() -> None:
     texts = [button.text for row in main_keyboard().keyboard for button in row]
 
-    assert texts == ["👀 WATCH", "📊 STATUS", "🚨 RECENT", "📈 STATS"]
+    assert texts == ["👀 WATCH", "📊 STATUS", "🚨 RECENT", "📈 STATS", "🧪 DEMO"]
 
 
 def test_no_pump_anomaly_is_saved_but_not_selected_for_telegram() -> None:
