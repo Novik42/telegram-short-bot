@@ -128,7 +128,7 @@ class TelegramNotificationService:
                     .join(PumpWatch, PumpWatch.id == PumpWatchTransition.pump_watch_id)
                     .where(
                         PumpWatchTransition.status.in_(
-                            ("REVERSAL_WARNING", "SHORT_CONFIRMED")
+                            ("WATCH", "REVERSAL_WARNING", "SHORT_CONFIRMED")
                         ),
                         PumpWatchTransition.notified_at.is_(None),
                     )
@@ -136,6 +136,13 @@ class TelegramNotificationService:
                 )
             ).all()
             for transition, watch in rows:
+                if transition.status == "WATCH" and (
+                    not self._is_initial_pump_transition(transition)
+                    or self._as_utc(transition.occurred_at)
+                    < utc_now() - timedelta(minutes=15)
+                ):
+                    transition.notified_at = utc_now()
+                    continue
                 if watch.symbol in self.excluded_symbols:
                     transition.notified_at = utc_now()
                     log.info(
@@ -181,12 +188,17 @@ class TelegramNotificationService:
             if label and label not in readable_reasons:
                 readable_reasons.append(label)
 
+        pump_detected = transition.status == "WATCH"
         confirmed = transition.status == "SHORT_CONFIRMED"
         lines = [
             (
-                f"🔻 РОЗВОРОТ ПІДТВЕРДЖЕНО: {watch.symbol}"
-                if confirmed
-                else f"⚠️ ПОПЕРЕДЖЕННЯ РОЗВОРОТУ: {watch.symbol}"
+                f"🔥 PUMP DETECTED: {watch.symbol}"
+                if pump_detected
+                else (
+                    f"🔻 РОЗВОРОТ ПІДТВЕРДЖЕНО: {watch.symbol}"
+                    if confirmed
+                    else f"⚠️ ПОПЕРЕДЖЕННЯ РОЗВОРОТУ: {watch.symbol}"
+                )
             ),
             "",
             f"Час: {self._format_time(transition.occurred_at)}",
@@ -212,14 +224,23 @@ class TelegramNotificationService:
             [
                 "",
                 (
-                    "Структура ціни підтвердила розворот, але це не автоматичний вхід."
-                    if confirmed
-                    else "Це раннє попередження. Чекаємо закріплення нижче підтримки."
+                    "Монету додано у WATCH. Чекаємо BOR або ознаки розвороту."
+                    if pump_detected
+                    else (
+                        "Структура ціни підтвердила розворот, але це не автоматичний вхід."
+                        if confirmed
+                        else "Це раннє попередження. Чекаємо закріплення нижче підтримки."
+                    )
                 ),
                 "Research signal — no automatic trading",
             ]
         )
         return "\n".join(lines)
+
+    @staticmethod
+    def _is_initial_pump_transition(transition: PumpWatchTransition) -> bool:
+        reasons = transition.reason_json.get("reasons", []) if transition.reason_json else []
+        return any(str(reason).startswith("pump_detected:") for reason in reasons)
 
     async def recent_anomaly_messages(self, *, limit: int = 3) -> list[str]:
         async with self.session_factory() as session:

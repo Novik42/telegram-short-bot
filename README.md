@@ -183,9 +183,13 @@ COLLECTION_INTERVAL_SECONDS=30
 ### Low-cap фокус і Telegram-шум
 
 Успішний collector більше не надсилає повний список після кожного BBM frame.
-Автоматично Telegram отримує тільки PUMP/BOR alert, `REVERSAL_WARNING`,
-`SHORT_CONFIRMED` або повідомлення про технічну помилку збору. Повний перелік
-доступний лише через `📊 STATUS`.
+Автоматично Telegram отримує одноразовий `PUMP DETECTED` при створенні WATCH,
+PUMP/BOR alert, `REVERSAL_WARNING`, `SHORT_CONFIRMED` або повідомлення про
+технічну помилку збору. Повний перелік доступний лише через `📊 STATUS`.
+
+Старі WATCH transitions після restart не надсилаються заднім числом: pump alert
+має бути початковим transition і не старшим за 15 хвилин. Повернення зі warning
+до WATCH після нового максимуму також не створює повторного pump alert.
 
 `HIGH_CAP_EXCLUDED_SYMBOLS` — comma-separated список великих активів. Їхні raw
 Borrow/Market/Candle snapshots продовжують зберігатися, але вони не створюють

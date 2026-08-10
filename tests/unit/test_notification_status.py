@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 from app.bot.keyboards import main_keyboard
 from app.models.anomaly import AnomalyEvent
 from app.models.borrow import BorrowSnapshot
+from app.models.watch import PumpWatchTransition
 from app.services.collector import CollectionResult
 from app.services.notification_service import (
     BorrowChange,
@@ -78,3 +79,17 @@ async def test_successful_collection_does_not_send_automatic_status() -> None:
     await notifier.notify_collection(CollectionResult(borrow_received=14))
 
     bot.send_message.assert_not_awaited()
+
+
+def test_only_initial_watch_transition_is_a_pump_notification() -> None:
+    initial = PumpWatchTransition(
+        status="WATCH",
+        reason_json={"reasons": ["pump_detected:POST_PUMP_BORROW"]},
+    )
+    reset = PumpWatchTransition(
+        status="WATCH",
+        reason_json={"reasons": ["new_peak_reset_warning"]},
+    )
+
+    assert TelegramNotificationService._is_initial_pump_transition(initial) is True
+    assert TelegramNotificationService._is_initial_pump_transition(reset) is False
