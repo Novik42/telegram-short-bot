@@ -220,6 +220,12 @@ def build_router(
                 _format_open_trade(trade),
                 reply_markup=close_trade_keyboard(trade.id),
             )
+        elif trade.status == "EMERGENCY_CLOSED":
+            await progress.edit_text(
+                "🛑 DEMO позиція короткочасно відкрилась, але risk-guard "
+                "аварійно закрив її. Відкритої позиції не залишилось.\n"
+                f"Причина: {trade.error_message}"
+            )
         elif trade.status == "UNPROTECTED_ERROR":
             await progress.edit_text(
                 "🚨 КРИТИЧНО: захисний stop-loss і аварійне закриття не підтверджені. "
