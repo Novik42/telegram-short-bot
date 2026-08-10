@@ -73,3 +73,49 @@ class MarketRepository:
             result = await self.session.execute(statement)
             inserted += max(0, result.rowcount or 0)
         return inserted
+
+    async def upsert_candles(self, items: Sequence[CandleItem]) -> int:
+        """Insert candles and refresh OHLCV for a still-open Binance candle."""
+        if not items:
+            return 0
+        is_sqlite = self.session.bind is not None and self.session.bind.dialect.name == "sqlite"
+        insert_function = sqlite_insert if is_sqlite else postgresql_insert
+        batch_size = 50 if is_sqlite else 500
+        affected = 0
+        for start in range(0, len(items), batch_size):
+            batch = items[start : start + batch_size]
+            statement = insert_function(Candle).values(
+                [
+                    {
+                        "symbol": item.symbol,
+                        "market_type": item.market_type,
+                        "interval": item.interval,
+                        "open_time": item.open_time,
+                        "open": item.open,
+                        "high": item.high,
+                        "low": item.low,
+                        "close": item.close,
+                        "volume": item.volume,
+                        "quote_volume": item.quote_volume,
+                        "trades_count": item.trades_count,
+                        "close_time": item.close_time,
+                    }
+                    for item in batch
+                ]
+            )
+            statement = statement.on_conflict_do_update(
+                index_elements=["symbol", "market_type", "interval", "open_time"],
+                set_={
+                    "open": statement.excluded.open,
+                    "high": statement.excluded.high,
+                    "low": statement.excluded.low,
+                    "close": statement.excluded.close,
+                    "volume": statement.excluded.volume,
+                    "quote_volume": statement.excluded.quote_volume,
+                    "trades_count": statement.excluded.trades_count,
+                    "close_time": statement.excluded.close_time,
+                },
+            )
+            result = await self.session.execute(statement)
+            affected += max(0, result.rowcount or 0)
+        return affected

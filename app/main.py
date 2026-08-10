@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.logging import configure_logging
 from app.runtime import build_runtime
 from app.services.notification_service import TelegramNotificationService
+from app.utils.datetime import utc_now
 
 log = structlog.get_logger(__name__)
 
@@ -47,7 +48,8 @@ async def run() -> None:
     async def collect_and_notify() -> None:
         result = await runtime.collector.collect_once()
         await runtime.outcome_evaluator.evaluate_due()
-        await runtime.reversal_tracker.evaluate_latest()
+        await runtime.watch_market_updater.refresh_active()
+        await runtime.reversal_tracker.evaluate_latest(evaluated_at=utc_now())
         if notifier is not None:
             await notifier.notify_collection(result)
             await notifier.notify_anomalies(result.anomaly_event_ids)

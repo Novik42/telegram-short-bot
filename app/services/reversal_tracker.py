@@ -182,7 +182,9 @@ class ReversalTracker:
         self.session_factory = session_factory
         self.settings = settings
 
-    async def evaluate_latest(self) -> ReversalTrackingResult:
+    async def evaluate_latest(
+        self, *, evaluated_at: datetime | None = None
+    ) -> ReversalTrackingResult:
         counters = {
             "watches_created": 0,
             "warnings_created": 0,
@@ -197,7 +199,7 @@ class ReversalTracker:
             )
             if latest_source_at is None:
                 return ReversalTrackingResult()
-            evaluated_at = latest_source_at
+            effective_evaluated_at = evaluated_at or latest_source_at
 
             borrow_rows = list(
                 (
@@ -205,7 +207,8 @@ class ReversalTracker:
                         select(BorrowSnapshot)
                         .where(
                             BorrowSnapshot.source_timestamp
-                            >= latest_source_at - timedelta(hours=1)
+                            >= latest_source_at
+                            - timedelta(hours=self.settings.reversal_watch_hours)
                         )
                         .order_by(BorrowSnapshot.source_timestamp.desc())
                     )
@@ -213,9 +216,12 @@ class ReversalTracker:
             )
             latest_borrow: dict[str, BorrowSnapshot] = {}
             histories: dict[str, list[BorrowSnapshot]] = {}
+            current_source_symbols: set[str] = set()
             for row in borrow_rows:
                 latest_borrow.setdefault(row.symbol, row)
                 histories.setdefault(row.symbol, []).append(row)
+                if _as_utc(row.source_timestamp) == _as_utc(latest_source_at):
+                    current_source_symbols.add(row.symbol)
             symbols = sorted(latest_borrow)
             if not symbols:
                 return ReversalTrackingResult()
@@ -240,8 +246,9 @@ class ReversalTracker:
                         .where(
                             Candle.symbol.in_(symbols),
                             Candle.interval == "5m",
-                            Candle.open_time >= latest_source_at - timedelta(hours=8),
-                            Candle.open_time <= latest_source_at,
+                            Candle.open_time
+                            >= effective_evaluated_at - timedelta(hours=8),
+                            Candle.open_time <= effective_evaluated_at,
                         )
                         .order_by(Candle.symbol, Candle.open_time)
                     )
@@ -273,7 +280,7 @@ class ReversalTracker:
                 candles = candle_history.get(symbol, [])
                 price_context = analyze_price_context(
                     candles,
-                    evaluated_at,
+                    effective_evaluated_at,
                     pump_1h_threshold=self.settings.min_price_pump_1h_pct,
                     pump_4h_threshold=self.settings.min_price_pump_4h_pct,
                     max_fresh_pump_drawdown_pct=(
@@ -283,11 +290,13 @@ class ReversalTracker:
                 )
                 key = (symbol, borrow.source_name)
                 watch = active.get(key)
-                if watch is not None and _as_utc(watch.expires_at) <= _as_utc(evaluated_at):
+                if watch is not None and _as_utc(watch.expires_at) <= _as_utc(
+                    effective_evaluated_at
+                ):
                     self._expire_watch(
                         session,
                         watch,
-                        evaluated_at=evaluated_at,
+                        evaluated_at=effective_evaluated_at,
                         borrow=borrow,
                         current_price=market.price,
                         price_context=price_context,
@@ -298,6 +307,8 @@ class ReversalTracker:
                     continue
 
                 if watch is None:
+                    if symbol not in current_source_symbols:
+                        continue
                     if price_context.scenario not in PUMP_SCENARIOS:
                         continue
                     watch = self._create_watch(
@@ -306,7 +317,7 @@ class ReversalTracker:
                         current_price=market.price,
                         price_context=price_context,
                         candles=candles,
-                        evaluated_at=evaluated_at,
+                        evaluated_at=effective_evaluated_at,
                         histories=histories,
                     )
                     active[key] = watch
@@ -326,7 +337,7 @@ class ReversalTracker:
                             * 5
                         )
                     ],
-                    evaluated_at=evaluated_at,
+                    evaluated_at=effective_evaluated_at,
                     current_price=market.price,
                     previous_peak=watch.peak_price,
                     warning_at=warning_at,
@@ -338,12 +349,12 @@ class ReversalTracker:
                     top_zone_depth_pct=self.settings.reversal_top_zone_depth_pct,
                 )
                 previous_peak = watch.peak_price
-                watch.last_evaluated_at = evaluated_at
+                watch.last_evaluated_at = effective_evaluated_at
                 watch.last_price = market.price
                 watch.drawdown_pct = analysis.drawdown_pct
                 if analysis.peak_price > watch.peak_price:
                     watch.peak_price = analysis.peak_price
-                    watch.peak_at = evaluated_at
+                    watch.peak_at = effective_evaluated_at
 
                 recovered_to_new_peak = (
                     watch.status == "REVERSAL_WARNING"
@@ -361,7 +372,7 @@ class ReversalTracker:
                         session,
                         watch,
                         status="WATCH",
-                        occurred_at=evaluated_at,
+                        occurred_at=effective_evaluated_at,
                         borrow=borrow,
                         price_context=price_context,
                         current_price=market.price,
@@ -371,7 +382,9 @@ class ReversalTracker:
                     )
                 elif watch.status == "REVERSAL_WARNING" and analysis.confirmed:
                     watch.status = "SHORT_CONFIRMED"
-                    watch.confirmed_at = analysis.latest_closed_at or evaluated_at
+                    watch.confirmed_at = (
+                        analysis.latest_closed_at or effective_evaluated_at
+                    )
                     watch.support_price = analysis.support_price
                     self._add_transition(
                         session,
@@ -388,7 +401,7 @@ class ReversalTracker:
                     counters["reversals_confirmed"] += 1
                 elif watch.status == "WATCH" and analysis.confirmed:
                     watch.status = "SHORT_CONFIRMED"
-                    watch.warning_at = analysis.latest_closed_at or evaluated_at
+                    watch.warning_at = analysis.latest_closed_at or effective_evaluated_at
                     watch.confirmed_at = watch.warning_at
                     watch.support_price = analysis.support_price
                     self._add_transition(
@@ -409,7 +422,7 @@ class ReversalTracker:
                     watch.warning_at = (
                         analysis.latest_closed_at
                         if analysis.support_break or analysis.lower_high
-                        else evaluated_at
+                        else effective_evaluated_at
                     )
                     watch.support_price = analysis.support_price
                     self._add_transition(
@@ -432,7 +445,7 @@ class ReversalTracker:
                 watch.reason_json = {
                     **(watch.reason_json or {}),
                     "latest_reversal_analysis": {
-                        "evaluated_at": evaluated_at.isoformat(),
+                        "evaluated_at": effective_evaluated_at.isoformat(),
                         "previous_peak": str(previous_peak),
                         "peak_price": str(analysis.peak_price),
                         "drawdown_pct": str(analysis.drawdown_pct),

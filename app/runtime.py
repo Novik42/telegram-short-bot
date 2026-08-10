@@ -12,6 +12,7 @@ from app.services.anomaly_detector import AnomalyDetector
 from app.services.collector import Collector
 from app.services.outcome_evaluator import OutcomeEvaluator
 from app.services.reversal_tracker import ReversalTracker
+from app.services.watch_market_updater import WatchMarketUpdater
 
 
 @dataclass(slots=True)
@@ -23,6 +24,7 @@ class Runtime:
     collector: Collector
     outcome_evaluator: OutcomeEvaluator
     reversal_tracker: ReversalTracker
+    watch_market_updater: WatchMarketUpdater
 
     async def close(self) -> None:
         await self.borrow_provider.aclose()
@@ -66,4 +68,7 @@ def build_runtime(settings: Settings) -> Runtime:
         ),
         outcome_evaluator=OutcomeEvaluator(session_factory, market_provider),
         reversal_tracker=ReversalTracker(session_factory, settings),
+        watch_market_updater=WatchMarketUpdater(
+            market_provider, session_factory, settings
+        ),
     )
