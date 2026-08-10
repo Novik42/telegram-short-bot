@@ -32,6 +32,10 @@ Borrow/Repay та незалежних публічних ринкових да�
 - окремі Telegram-сповіщення про раннє попередження і підтверджений розворот;
 - `NO_PUMP` BOR anomalies зберігаються для статистики та outcomes, але не
   надсилаються в Telegram і не потрапляють у `/recent`;
+- успішні цикли збору працюють тихо; повний snapshot надсилається лише вручну
+  через `📊 STATUS` або `/status`;
+- configurable high-cap exclusion залишає raw snapshots у БД, але прибирає
+  великі монети зі status, WATCH, BOR alerts і reversal alerts;
 - у звичайному Telegram snapshot для кожного символу: ΔBOR 3m/15m,
   price change 1h/4h і мітка `PUMP / NO PUMP`;
 - автоматичну оцінку кожного живого сигналу через 15 хв, 1 год, 4 год і 24 год;
@@ -175,6 +179,18 @@ COLLECTION_INTERVAL_SECONDS=30
 Структурні рішення використовують тільки закриті 5m свічки. Поточна market price
 використовується для high-water mark і величини відкату. `SHORT_CONFIRMED` є
 дослідницькою міткою, а не командою відкрити угоду.
+
+### Low-cap фокус і Telegram-шум
+
+Успішний collector більше не надсилає повний список після кожного BBM frame.
+Автоматично Telegram отримує тільки PUMP/BOR alert, `REVERSAL_WARNING`,
+`SHORT_CONFIRMED` або повідомлення про технічну помилку збору. Повний перелік
+доступний лише через `📊 STATUS`.
+
+`HIGH_CAP_EXCLUDED_SYMBOLS` — comma-separated список великих активів. Їхні raw
+Borrow/Market/Candle snapshots продовжують зберігатися, але вони не створюють
+anomaly/watch/reversal signals і приховані зі звичайного status. Це керований
+список, а не live market-cap рейтинг; його можна змінити в `.env` без коду.
 
 Примусовий одноразовий перерахунок усіх результатів, строк яких уже настав:
 

@@ -46,10 +46,12 @@ class TelegramNotificationService:
         *,
         configured_chat_id: str | None = None,
         chat_id_file: Path = Path(".telegram_chat_id"),
+        excluded_symbols: frozenset[str] = frozenset(),
     ) -> None:
         self.bot = bot
         self.session_factory = session_factory
         self.chat_id_file = chat_id_file
+        self.excluded_symbols = excluded_symbols
         self.chat_id = self._initial_chat_id(configured_chat_id)
 
     def _initial_chat_id(self, configured_chat_id: str | None) -> int | None:
@@ -73,16 +75,13 @@ class TelegramNotificationService:
         return self.chat_id == chat_id
 
     async def notify_collection(self, result: CollectionResult) -> None:
-        if self.chat_id is None or result.borrow_received == 0:
+        if self.chat_id is None or not result.error:
             return
-        if result.error:
-            text = (
-                "⚠️ Збір завершився частково\n"
-                f"Borrow отримано: {result.borrow_received}\n"
-                f"Помилка: {result.error}"
-            )
-        else:
-            text = "✅ Нові дані зібрано\n\n" + await self.render_status()
+        text = (
+            "⚠️ Збір завершився частково\n"
+            f"Borrow отримано: {result.borrow_received}\n"
+            f"Помилка: {result.error}"
+        )
         try:
             await self.bot.send_message(self.chat_id, text, reply_markup=main_keyboard())
         except TelegramAPIError as exc:
@@ -100,7 +99,9 @@ class TelegramNotificationService:
                 )
             ).all()
         for event in events:
-            if not self._should_notify_anomaly(event):
+            if event.symbol in self.excluded_symbols or not self._should_notify_anomaly(
+                event
+            ):
                 log.info(
                     "telegram_anomaly_suppressed_for_research",
                     event_id=event.id,
@@ -135,6 +136,14 @@ class TelegramNotificationService:
                 )
             ).all()
             for transition, watch in rows:
+                if watch.symbol in self.excluded_symbols:
+                    transition.notified_at = utc_now()
+                    log.info(
+                        "telegram_reversal_suppressed_high_cap",
+                        transition_id=transition.id,
+                        symbol=watch.symbol,
+                    )
+                    continue
                 try:
                     await self.bot.send_message(
                         self.chat_id,
@@ -221,7 +230,12 @@ class TelegramNotificationService:
                     .limit(max(limit * 20, 100))
                 )
             ).all()
-        actionable = [event for event in events if self._should_notify_anomaly(event)]
+        actionable = [
+            event
+            for event in events
+            if event.symbol not in self.excluded_symbols
+            and self._should_notify_anomaly(event)
+        ]
         return [self._format_anomaly(event) for event in actionable[:limit]]
 
     @staticmethod
@@ -340,6 +354,9 @@ class TelegramNotificationService:
                     )
                 ).all()
             )
+            watch_rows = [
+                row for row in watch_rows if row.symbol not in self.excluded_symbols
+            ]
             borrow_rows = list(
                 (
                     await session.scalars(
@@ -355,6 +372,9 @@ class TelegramNotificationService:
                     )
                 ).all()
             )
+            borrow_rows = [
+                row for row in borrow_rows if row.symbol not in self.excluded_symbols
+            ]
             symbols = sorted(
                 {row.symbol for row in borrow_rows}
                 | {row.symbol for row in watch_rows}
@@ -590,6 +610,20 @@ class TelegramNotificationService:
                 )
             ).all()
 
+            excluded_seen = sorted(
+                {
+                    row.symbol
+                    for row in borrow_rows
+                    if row.symbol in self.excluded_symbols
+                }
+            )
+            borrow_rows = [
+                row for row in borrow_rows if row.symbol not in self.excluded_symbols
+            ]
+            market_rows = [
+                row for row in market_rows if row.symbol not in self.excluded_symbols
+            ]
+
             symbols = sorted({row.symbol for row in borrow_rows})
             candle_rows: list[Candle] = []
             if symbols and latest_source_at is not None:
@@ -629,6 +663,8 @@ class TelegramNotificationService:
         ]
         if borrow_rows:
             lines.append(f"Оновлення джерела: {self._format_time(borrow_rows[0].source_timestamp)}")
+        if excluded_seen:
+            lines.append(f"High-cap приховано: {', '.join(excluded_seen)}")
         lines.append("")
         for symbol in sorted(set(latest_borrow) | set(latest_market)):
             borrow = latest_borrow.get(symbol)

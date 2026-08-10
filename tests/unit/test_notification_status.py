@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 from app.bot.keyboards import main_keyboard
 from app.models.anomaly import AnomalyEvent
 from app.models.borrow import BorrowSnapshot
+from app.services.collector import CollectionResult
 from app.services.notification_service import (
     BorrowChange,
     TelegramNotificationService,
@@ -63,3 +65,16 @@ def test_no_pump_anomaly_is_saved_but_not_selected_for_telegram() -> None:
 
     event.reason_json = {"scenario": "POST_PUMP_BORROW"}
     assert TelegramNotificationService._should_notify_anomaly(event) is True
+
+
+async def test_successful_collection_does_not_send_automatic_status() -> None:
+    bot = AsyncMock()
+    notifier = TelegramNotificationService(
+        bot,
+        AsyncMock(),
+        configured_chat_id="123",
+    )
+
+    await notifier.notify_collection(CollectionResult(borrow_received=14))
+
+    bot.send_message.assert_not_awaited()

@@ -17,3 +17,12 @@ def test_existing_sqlalchemy_driver_url_is_unchanged() -> None:
     settings = Settings(_env_file=None, database_url="sqlite+aiosqlite:///./monitor.db")
 
     assert settings.database_url == "sqlite+aiosqlite:///./monitor.db"
+
+
+def test_high_cap_exclusion_is_configurable_csv() -> None:
+    settings = Settings(
+        _env_file=None,
+        high_cap_excluded_symbols="sol, TRX, sui",
+    )
+
+    assert settings.high_cap_excluded_symbol_set == frozenset({"SOL", "TRX", "SUI"})

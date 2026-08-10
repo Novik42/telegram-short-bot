@@ -35,6 +35,9 @@ class AnomalyDetector:
     ) -> list[AnomalyEvent]:
         events: list[AnomalyEvent] = []
         for item in items:
+            if item.symbol in self.settings.high_cap_excluded_symbol_set:
+                log.debug("high_cap_anomaly_skipped", symbol=item.symbol)
+                continue
             event = await self._detect_one(item)
             if event is not None:
                 events.append(event)

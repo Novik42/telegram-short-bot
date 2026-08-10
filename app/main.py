@@ -35,6 +35,7 @@ async def run() -> None:
             bot,
             runtime.session_factory,
             configured_chat_id=settings.telegram_chat_id,
+            excluded_symbols=settings.high_cap_excluded_symbol_set,
         )
         dispatcher = Dispatcher()
         dispatcher.include_router(build_router(notifier))

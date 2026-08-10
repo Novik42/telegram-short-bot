@@ -69,10 +69,22 @@ class Settings(BaseSettings):
     reversal_confirm_drawdown_pct: Decimal = Decimal("5")
     reversal_support_lookback_candles: int = Field(default=4, ge=2, le=12)
     reversal_lower_high_drop_pct: Decimal = Decimal("0.5")
+    high_cap_excluded_symbols: str = (
+        "AAVE,ADA,APT,AVAX,BCH,BNB,BTC,CRO,DOGE,DOT,ETC,ETH,HBAR,ICP,"
+        "LINK,LTC,NEAR,PAXG,PEPE,POL,SHIB,SOL,SUI,TAO,TON,TRX,UNI,XLM,XRP"
+    )
 
     @property
     def collection_seconds(self) -> int:
         return self.collection_interval_seconds or self.collection_interval_minutes * 60
+
+    @property
+    def high_cap_excluded_symbol_set(self) -> frozenset[str]:
+        return frozenset(
+            symbol.strip().upper()
+            for symbol in self.high_cap_excluded_symbols.split(",")
+            if symbol.strip()
+        )
 
     @field_validator("borrow_json_url", "borrow_html_url", mode="before")
     @classmethod

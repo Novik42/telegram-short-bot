@@ -16,10 +16,10 @@ def build_router(notifier: TelegramNotificationService) -> Router:
         if not notifier.register_chat(message.chat.id):
             await message.answer("Цей бот уже прив’язаний до іншого Telegram-чату.")
             return
-        report = await notifier.render_status()
         await message.answer(
-            "✅ Монітор підключено. Після кожного нового збору я надсилатиму дані сюди.\n\n"
-            + report,
+            "✅ Монітор підключено.\n"
+            "Повний звіт надсилається лише після натискання 📊 STATUS.\n"
+            "Автоматично приходитимуть тільки PUMP/BOR і сигнали розвороту.",
             reply_markup=main_keyboard(),
         )
         recent = await notifier.recent_anomaly_messages(limit=1)

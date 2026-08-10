@@ -228,6 +228,8 @@ class ReversalTracker:
                 active.setdefault((row.symbol, row.source_name), row)
 
             for symbol, borrow in latest_borrow.items():
+                if symbol in self.settings.high_cap_excluded_symbol_set:
+                    continue
                 market = latest_market.get(symbol)
                 if market is None:
                     continue

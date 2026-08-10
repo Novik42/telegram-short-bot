@@ -119,6 +119,7 @@ async def _send_recent_anomaly() -> None:
             bot,
             session_factory,
             configured_chat_id=settings.telegram_chat_id,
+            excluded_symbols=settings.high_cap_excluded_symbol_set,
         )
         await notifier.notify_anomalies((event_id,))
         print(f"Sent anomaly event {event_id} to Telegram")
