@@ -112,6 +112,11 @@ class TelegramNotificationService:
                 continue
             try:
                 await self.bot.send_message(self.chat_id, self._format_anomaly(event))
+                log.info(
+                    "telegram_anomaly_sent",
+                    event_id=event.id,
+                    symbol=event.symbol,
+                )
             except TelegramAPIError as exc:
                 log.error(
                     "telegram_anomaly_notification_failed",
@@ -159,6 +164,12 @@ class TelegramNotificationService:
                         self.chat_id,
                         self._format_reversal_transition(transition, watch),
                         reply_markup=reply_markup,
+                    )
+                    log.info(
+                        "telegram_reversal_sent",
+                        transition_id=transition.id,
+                        symbol=watch.symbol,
+                        status=transition.status,
                     )
                 except TelegramAPIError as exc:
                     log.error(

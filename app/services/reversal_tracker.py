@@ -38,6 +38,7 @@ class ReversalAnalysis:
 @dataclass(frozen=True, slots=True)
 class ReversalTrackingResult:
     watches_created: int = 0
+    watches_rearmed: int = 0
     warnings_created: int = 0
     reversals_confirmed: int = 0
     watches_expired: int = 0
@@ -45,6 +46,20 @@ class ReversalTrackingResult:
 
 def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def can_rearm_confirmed_watch(
+    watch: PumpWatch,
+    price_context: PriceContext,
+    current_price: Decimal,
+) -> bool:
+    """Treat a fresh pump above the old broken support as a new watch episode."""
+    return (
+        watch.status == "SHORT_CONFIRMED"
+        and price_context.scenario in PUMP_SCENARIOS
+        and watch.support_price is not None
+        and current_price > watch.support_price
+    )
 
 
 def _closed_candles(candles: list[Candle], evaluated_at: datetime) -> list[Candle]:
@@ -86,9 +101,7 @@ def _primary_structure_support(
     if len(candles) < lookback_candles + 1 or peak_price <= 0:
         return None
     reference = candles[:-1]
-    top_zone_floor = peak_price * (
-        Decimal("1") - top_zone_depth_pct / PERCENT
-    )
+    top_zone_floor = peak_price * (Decimal("1") - top_zone_depth_pct / PERCENT)
     pivots: list[Decimal] = []
     for index in range(1, len(reference) - 1):
         previous = reference[index - 1].low
@@ -122,9 +135,7 @@ def analyze_reversal(
     latest_high = latest.high if latest else current_price
     peak = max(previous_peak, current_price, latest_high)
     new_peak = peak > previous_peak
-    drawdown = (
-        (peak - current_price) / peak * PERCENT if peak > 0 else Decimal("0")
-    )
+    drawdown = (peak - current_price) / peak * PERCENT if peak > 0 else Decimal("0")
 
     support = _primary_structure_support(
         closed,
@@ -148,16 +159,13 @@ def analyze_reversal(
     failed_reclaim = False
     if latest and warning_at and warning_support is not None:
         failed_reclaim = (
-            _as_utc(latest.close_time) > _as_utc(warning_at)
-            and latest.close < warning_support
+            _as_utc(latest.close_time) > _as_utc(warning_at) and latest.close < warning_support
         )
     confirmed = failed_reclaim
     if failed_reclaim:
         reasons.append("next_5m_close_failed_to_reclaim_support")
         if drawdown >= confirm_drawdown_pct:
-            reasons.append(
-                f"drawdown_gte_{confirm_drawdown_pct}_with_failed_reclaim"
-            )
+            reasons.append(f"drawdown_gte_{confirm_drawdown_pct}_with_failed_reclaim")
 
     return ReversalAnalysis(
         peak_price=peak,
@@ -187,6 +195,7 @@ class ReversalTracker:
     ) -> ReversalTrackingResult:
         counters = {
             "watches_created": 0,
+            "watches_rearmed": 0,
             "warnings_created": 0,
             "reversals_confirmed": 0,
             "watches_expired": 0,
@@ -246,8 +255,7 @@ class ReversalTracker:
                         .where(
                             Candle.symbol.in_(symbols),
                             Candle.interval == "5m",
-                            Candle.open_time
-                            >= effective_evaluated_at - timedelta(hours=8),
+                            Candle.open_time >= effective_evaluated_at - timedelta(hours=8),
                             Candle.open_time <= effective_evaluated_at,
                         )
                         .order_by(Candle.symbol, Candle.open_time)
@@ -283,9 +291,7 @@ class ReversalTracker:
                     effective_evaluated_at,
                     pump_1h_threshold=self.settings.min_price_pump_1h_pct,
                     pump_4h_threshold=self.settings.min_price_pump_4h_pct,
-                    max_fresh_pump_drawdown_pct=(
-                        self.settings.max_fresh_pump_drawdown_pct
-                    ),
+                    max_fresh_pump_drawdown_pct=(self.settings.max_fresh_pump_drawdown_pct),
                     bounce_after_dump_4h_pct=self.settings.bounce_after_dump_4h_pct,
                 )
                 key = (symbol, borrow.source_name)
@@ -331,10 +337,7 @@ class ReversalTracker:
                         if _as_utc(candle.open_time)
                         >= _as_utc(watch.started_at)
                         - timedelta(
-                            minutes=(
-                                self.settings.reversal_support_lookback_candles + 2
-                            )
-                            * 5
+                            minutes=(self.settings.reversal_support_lookback_candles + 2) * 5
                         )
                     ],
                     evaluated_at=effective_evaluated_at,
@@ -364,7 +367,40 @@ class ReversalTracker:
                 change_3m = calculate_borrow_change(histories[symbol], borrow, minutes=3)
                 change_15m = calculate_borrow_change(histories[symbol], borrow, minutes=15)
 
-                if recovered_to_new_peak:
+                recovered_after_confirmation = can_rearm_confirmed_watch(
+                    watch,
+                    price_context,
+                    market.price,
+                )
+
+                if recovered_after_confirmation:
+                    watch.status = "WATCH"
+                    watch.started_at = effective_evaluated_at
+                    watch.expires_at = effective_evaluated_at + timedelta(
+                        hours=self.settings.reversal_watch_hours
+                    )
+                    watch.warning_at = None
+                    watch.confirmed_at = None
+                    watch.closed_at = None
+                    watch.price_at_watch = market.price
+                    watch.support_price = None
+                    self._add_transition(
+                        session,
+                        watch,
+                        status="WATCH",
+                        occurred_at=effective_evaluated_at,
+                        borrow=borrow,
+                        price_context=price_context,
+                        current_price=market.price,
+                        change_3m=change_3m,
+                        change_15m=change_15m,
+                        reason_json={
+                            "reasons": [f"pump_detected:REARMED_{price_context.scenario}"],
+                            "previous_confirmation_reclaimed": True,
+                        },
+                    )
+                    counters["watches_rearmed"] += 1
+                elif recovered_to_new_peak:
                     watch.status = "WATCH"
                     watch.warning_at = None
                     watch.support_price = None
@@ -382,9 +418,7 @@ class ReversalTracker:
                     )
                 elif watch.status == "REVERSAL_WARNING" and analysis.confirmed:
                     watch.status = "SHORT_CONFIRMED"
-                    watch.confirmed_at = (
-                        analysis.latest_closed_at or effective_evaluated_at
-                    )
+                    watch.confirmed_at = analysis.latest_closed_at or effective_evaluated_at
                     watch.support_price = analysis.support_price
                     self._add_transition(
                         session,
@@ -514,9 +548,7 @@ class ReversalTracker:
                     else None
                 ),
                 "high_4h": (
-                    str(price_context.high_4h)
-                    if price_context.high_4h is not None
-                    else None
+                    str(price_context.high_4h) if price_context.high_4h is not None else None
                 ),
                 "drawdown_from_high_4h_pct": (
                     str(price_context.drawdown_from_high_4h_pct)

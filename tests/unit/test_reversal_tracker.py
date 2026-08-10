@@ -2,7 +2,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.models.market import Candle
-from app.services.reversal_tracker import analyze_reversal
+from app.models.watch import PumpWatch
+from app.services.price_analyzer import PriceContext
+from app.services.reversal_tracker import analyze_reversal, can_rearm_confirmed_watch
 
 
 def _candle(start: datetime, *, high: str, low: str, close: str) -> Candle:
@@ -72,9 +74,7 @@ def test_break_of_upper_structure_creates_warning_before_confirmation() -> None:
     assert warning.warning is True
     assert warning.confirmed is False
 
-    failed_reclaim = _candle(
-        start + timedelta(minutes=25), high="224", low="218", close="221"
-    )
+    failed_reclaim = _candle(start + timedelta(minutes=25), high="224", low="218", close="221")
     confirmation = analyze_reversal(
         [*candles, failed_reclaim],
         evaluated_at=start + timedelta(minutes=30),
@@ -94,9 +94,7 @@ def test_next_close_below_warning_support_confirms_reversal() -> None:
         _candle(start + timedelta(minutes=index * 5), high="101", low="98", close="99")
         for index in range(4)
     ]
-    initial.append(
-        _candle(start + timedelta(minutes=20), high="99", low="96", close="97")
-    )
+    initial.append(_candle(start + timedelta(minutes=20), high="99", low="96", close="97"))
     first_evaluation = start + timedelta(minutes=25)
     warning = analyze_reversal(
         initial,
@@ -111,9 +109,7 @@ def test_next_close_below_warning_support_confirms_reversal() -> None:
     assert warning.support_break is True
     assert warning.support_price == Decimal("98")
 
-    next_candle = _candle(
-        start + timedelta(minutes=25), high="98", low="95", close="96"
-    )
+    next_candle = _candle(start + timedelta(minutes=25), high="98", low="95", close="96")
     confirmed = analyze_reversal(
         [*initial, next_candle],
         evaluated_at=start + timedelta(minutes=30),
@@ -142,3 +138,22 @@ def test_new_peak_is_tracked_without_warning() -> None:
     assert result.peak_price == Decimal("105")
     assert result.drawdown_pct == 0
     assert result.warning is False
+
+
+def test_confirmed_watch_can_be_rearmed_only_after_reclaim_during_fresh_pump() -> None:
+    watch = PumpWatch(
+        status="SHORT_CONFIRMED",
+        support_price=Decimal("0.0667"),
+    )
+    fresh_pump = PriceContext(scenario="POST_PUMP_BORROW")
+
+    assert can_rearm_confirmed_watch(watch, fresh_pump, Decimal("0.0699")) is True
+    assert can_rearm_confirmed_watch(watch, fresh_pump, Decimal("0.0650")) is False
+    assert (
+        can_rearm_confirmed_watch(
+            watch,
+            PriceContext(scenario="NO_PUMP"),
+            Decimal("0.0699"),
+        )
+        is False
+    )
