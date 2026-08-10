@@ -66,7 +66,9 @@ async def test_tracker_persists_new_pump_watch(tmp_path) -> None:
             session_factory,
             Settings(_env_file=None, database_url=database_url),
         )
-        result = await tracker.evaluate_latest()
+        result = await tracker.evaluate_latest(
+            evaluated_at=signal_at + timedelta(minutes=1)
+        )
 
         assert result.watches_created == 1
         async with session_factory() as session:

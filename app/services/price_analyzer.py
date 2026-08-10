@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.models.market import Candle
@@ -38,14 +38,26 @@ def pump_from_local_low(lows: list[Decimal], current: Decimal) -> Decimal | None
     return price_change(local_low, current) if local_low > 0 else None
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 def _nearest_start(candles: list[Candle], target: datetime) -> Candle | None:
-    eligible = [candle for candle in candles if candle.open_time <= target]
+    target_utc = _as_utc(target)
+    eligible = [
+        candle for candle in candles if _as_utc(candle.open_time) <= target_utc
+    ]
     return eligible[-1] if eligible else None
 
 
 def _window(candles: list[Candle], signal_at: datetime, minutes: int) -> list[Candle]:
-    start = signal_at - timedelta(minutes=minutes)
-    return [candle for candle in candles if start <= candle.open_time <= signal_at]
+    signal_utc = _as_utc(signal_at)
+    start = signal_utc - timedelta(minutes=minutes)
+    return [
+        candle
+        for candle in candles
+        if start <= _as_utc(candle.open_time) <= signal_utc
+    ]
 
 
 def analyze_price_context(
@@ -57,7 +69,7 @@ def analyze_price_context(
     max_fresh_pump_drawdown_pct: Decimal = Decimal("8"),
     bounce_after_dump_4h_pct: Decimal = Decimal("-10"),
 ) -> PriceContext:
-    ordered = sorted(candles, key=lambda candle: candle.open_time)
+    ordered = sorted(candles, key=lambda candle: _as_utc(candle.open_time))
     signal_candle = _nearest_start(ordered, signal_at)
     if signal_candle is None:
         return PriceContext()
