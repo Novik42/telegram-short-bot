@@ -9,6 +9,7 @@ from app.config import Settings
 from app.models import Base
 from app.models.watch import PumpWatch, PumpWatchTransition
 from app.providers.bybit_demo import (
+    BybitApiError,
     BybitBalance,
     BybitDemoClient,
     BybitInstrument,
@@ -49,6 +50,39 @@ def instrument() -> BybitInstrument:
 def test_bybit_demo_client_rejects_live_endpoint() -> None:
     with pytest.raises(ValueError, match="only permits"):
         BybitDemoClient("key", "secret", base_url="https://api.bybit.com")
+
+
+async def test_closed_bybit_contract_is_rejected_before_ticker_request(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'closed.db'}")
+    client = AsyncMock()
+    closed = instrument()
+    object.__setattr__(closed, "symbol", "LISTAUSDT")
+    object.__setattr__(closed, "status", "Closed")
+    client.get_instrument.return_value = closed
+    service = DemoTradingService(client, async_sessionmaker(engine), demo_settings())
+
+    with pytest.raises(DemoTradingError, match="LISTAUSDT.*Closed"):
+        await service._load_trade_context("LISTAUSDT")
+
+    client.get_ticker.assert_not_awaited()
+    client.get_balance.assert_not_awaited()
+    await engine.dispose()
+
+
+async def test_missing_bybit_contract_has_actionable_error(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'missing.db'}")
+    client = AsyncMock()
+    client.get_instrument.side_effect = BybitApiError(
+        -1,
+        "Linear instrument UNKNOWNUSDT not found",
+        endpoint="instrument",
+    )
+    service = DemoTradingService(client, async_sessionmaker(engine), demo_settings())
+
+    with pytest.raises(DemoTradingError, match="UNKNOWNUSDT.*Bybit Demo"):
+        await service._load_trade_context("UNKNOWNUSDT")
+
+    await engine.dispose()
 
 
 async def test_risk_sizing_is_one_percent_and_leverage_only_caps_notional(tmp_path) -> None:

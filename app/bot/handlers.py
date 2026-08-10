@@ -20,6 +20,7 @@ def build_router(
     demo_trading: DemoTradingService | None = None,
 ) -> Router:
     router = Router(name="margin_monitor")
+    preparing_transitions: set[int] = set()
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
@@ -151,19 +152,29 @@ def build_router(
         assert isinstance(callback.message, Message)
         try:
             transition_id = int((callback.data or "").rsplit(":", 1)[1])
+        except ValueError:
+            await callback.answer("Некоректна кнопка", show_alert=True)
+            return
+        if transition_id in preparing_transitions:
+            await callback.answer("Розрахунок уже виконується")
+            return
+
+        preparing_transitions.add(transition_id)
+        try:
+            await callback.answer("Перевіряю Bybit Demo…")
             trade = await demo_trading.prepare_short(transition_id, callback.from_user.id)
-        except (ValueError, DemoTradingError) as exc:
-            await callback.answer("Пропозицію не створено", show_alert=True)
+        except DemoTradingError as exc:
             await callback.message.answer(f"⚠️ DEMO SHORT скасовано: {exc}")
             return
         except Exception as exc:
             log.exception("demo_trade_proposal_failed", error=type(exc).__name__)
-            await callback.answer("Технічна помилка", show_alert=True)
             await callback.message.answer(
                 "⚠️ DEMO SHORT не підготовлено через технічну помилку. Ордер не створено."
             )
             return
-        await callback.answer("Розрахунок готовий")
+        finally:
+            preparing_transitions.discard(transition_id)
+        await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
             _format_trade_preview(trade),
             reply_markup=confirm_short_keyboard(trade.id),

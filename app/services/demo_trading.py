@@ -144,18 +144,18 @@ class DemoTradingService:
                         "Уже існує активна позиція або непідтверджена пропозиція"
                     )
 
-            bybit_positions = await self.client.get_open_positions()
+            try:
+                bybit_positions = await self.client.get_open_positions()
+            except BybitApiError as exc:
+                raise DemoTradingError(
+                    f"Не вдалося перевірити відкриті позиції Bybit Demo: {exc.message}"
+                ) from exc
             if bybit_positions:
                 symbols = ", ".join(sorted({position.symbol for position in bybit_positions}))
                 raise DemoTradingError(f"На Bybit Demo вже є відкрита позиція: {symbols}")
 
             symbol = f"{watch.symbol}USDT"
-            instrument, ticker, balance = await asyncio.gather(
-                self.client.get_instrument(symbol),
-                self.client.get_ticker(symbol),
-                self.client.get_balance(),
-            )
-            self._validate_instrument(instrument)
+            instrument, ticker, balance = await self._load_trade_context(symbol)
             price = ticker.mark_price
             self._validate_price(price, Decimal(transition.price))
             quantity, stop_loss, risk, notional, margin = self._calculate_order(
@@ -301,12 +301,7 @@ class DemoTradingService:
             order_ack = None
             order_attempted = False
             try:
-                instrument, ticker, balance = await asyncio.gather(
-                    self.client.get_instrument(trade.symbol),
-                    self.client.get_ticker(trade.symbol),
-                    self.client.get_balance(),
-                )
-                self._validate_instrument(instrument)
+                instrument, ticker, balance = await self._load_trade_context(trade.symbol)
                 self._validate_price(ticker.mark_price, Decimal(trade.proposal_price))
                 if ticker.mark_price >= Decimal(trade.support_price):
                     raise DemoTradingError("Ціна вже повернула пробиту підтримку — вхід скасовано")
@@ -507,16 +502,41 @@ class DemoTradingService:
             return trade
 
     def _validate_instrument(self, instrument: BybitInstrument) -> None:
-        if (
-            instrument.status != "Trading"
-            or instrument.settle_coin != "USDT"
-            or "Perpetual" not in instrument.contract_type
-        ):
-            raise DemoTradingError("Дозволені лише активні USDT perpetual контракти")
+        if instrument.status != "Trading":
+            raise DemoTradingError(
+                f"{instrument.symbol} недоступний для торгівлі у Bybit Demo "
+                f"(статус контракту: {instrument.status or 'невідомий'})"
+            )
+        if instrument.settle_coin != "USDT" or "Perpetual" not in instrument.contract_type:
+            raise DemoTradingError(
+                f"{instrument.symbol} не є активним USDT perpetual контрактом у Bybit Demo"
+            )
         if instrument.max_leverage < self.settings.demo_leverage:
             raise DemoTradingError(
                 f"Для {instrument.symbol} Bybit не дозволяє плече {self.settings.demo_leverage}×"
             )
+
+    async def _load_trade_context(self, symbol: str):
+        try:
+            instrument = await self.client.get_instrument(symbol)
+        except BybitApiError as exc:
+            raise DemoTradingError(
+                f"Контракт {symbol} не знайдено у Bybit Demo: {exc.message}"
+            ) from exc
+
+        # Validate the contract before requesting a ticker. Closed Bybit instruments can
+        # still be returned by instruments-info, but intentionally have no live ticker.
+        self._validate_instrument(instrument)
+        try:
+            ticker, balance = await asyncio.gather(
+                self.client.get_ticker(symbol),
+                self.client.get_balance(),
+            )
+        except BybitApiError as exc:
+            raise DemoTradingError(
+                f"Bybit Demo не повернув торгові дані для {symbol}: {exc.message}"
+            ) from exc
+        return instrument, ticker, balance
 
     def _validate_price(self, current: Decimal, reference: Decimal) -> None:
         if current <= 0 or reference <= 0:
