@@ -613,7 +613,7 @@ class TelegramNotificationService:
             latest_source_at = await session.scalar(
                 select(func.max(BorrowSnapshot.source_timestamp))
             )
-            borrow_rows = []
+            borrow_rows: list[BorrowSnapshot] = []
             if latest_source_at is not None:
                 borrow_rows = list(
                     (
@@ -638,15 +638,49 @@ class TelegramNotificationService:
                 )
             ).all()
 
+            current_borrow_rows = [
+                row
+                for row in borrow_rows
+                if latest_source_at is not None
+                and self._as_utc(row.source_timestamp) == self._as_utc(latest_source_at)
+            ]
             excluded_seen = sorted(
-                {row.symbol for row in borrow_rows if row.symbol in self.excluded_symbols}
+                {
+                    row.symbol
+                    for row in current_borrow_rows
+                    if row.symbol in self.excluded_symbols
+                }
             )
             borrow_rows = [row for row in borrow_rows if row.symbol not in self.excluded_symbols]
+            current_borrow_rows = [
+                row for row in current_borrow_rows if row.symbol not in self.excluded_symbols
+            ]
             market_rows = [row for row in market_rows if row.symbol not in self.excluded_symbols]
 
-            symbols = sorted({row.symbol for row in borrow_rows})
+            symbols = sorted(
+                {row.symbol for row in current_borrow_rows}
+                | {row.symbol for row in market_rows}
+            )
+            last_borrow_rows: list[BorrowSnapshot] = []
+            if symbols:
+                last_borrow_rows = list(
+                    (
+                        await session.scalars(
+                            select(BorrowSnapshot)
+                            .where(BorrowSnapshot.symbol.in_(symbols))
+                            .order_by(
+                                BorrowSnapshot.source_timestamp.desc(),
+                                BorrowSnapshot.id.desc(),
+                            )
+                        )
+                    ).all()
+                )
             candle_rows: list[Candle] = []
-            if symbols and latest_source_at is not None:
+            analysis_at_candidates = [row.captured_at for row in market_rows]
+            if latest_source_at is not None:
+                analysis_at_candidates.append(latest_source_at)
+            analysis_at = max(analysis_at_candidates) if analysis_at_candidates else None
+            if symbols and analysis_at is not None:
                 candle_rows = list(
                     (
                         await session.scalars(
@@ -654,8 +688,8 @@ class TelegramNotificationService:
                             .where(
                                 Candle.symbol.in_(symbols),
                                 Candle.interval == "5m",
-                                Candle.open_time >= latest_source_at - timedelta(hours=5),
-                                Candle.open_time <= latest_source_at,
+                                Candle.open_time >= analysis_at - timedelta(hours=5),
+                                Candle.open_time <= analysis_at,
                             )
                             .order_by(Candle.symbol, Candle.open_time)
                         )
@@ -663,8 +697,11 @@ class TelegramNotificationService:
                 )
 
         latest_borrow: dict[str, BorrowSnapshot] = {}
-        for row in borrow_rows:
+        for row in current_borrow_rows:
             latest_borrow.setdefault(row.symbol, row)
+        last_known_borrow: dict[str, BorrowSnapshot] = {}
+        for row in last_borrow_rows:
+            last_known_borrow.setdefault(row.symbol, row)
         latest_market: dict[str, MarketSnapshot] = {}
         for row in market_rows:
             latest_market.setdefault(row.symbol, row)
@@ -680,40 +717,48 @@ class TelegramNotificationService:
             f"Borrow snapshots: {borrow_count}",
             f"Market snapshots: {market_count}",
         ]
-        if borrow_rows:
-            lines.append(f"Оновлення джерела: {self._format_time(borrow_rows[0].source_timestamp)}")
+        if latest_source_at is not None:
+            lines.append(f"Оновлення джерела: {self._format_time(latest_source_at)}")
         if excluded_seen:
             lines.append(f"High-cap приховано: {', '.join(excluded_seen)}")
         lines.append("")
         for symbol in sorted(set(latest_borrow) | set(latest_market)):
             borrow = latest_borrow.get(symbol)
+            displayed_borrow = borrow or last_known_borrow.get(symbol)
             market = latest_market.get(symbol)
             lines.append(f"🪙 {symbol}")
-            if borrow:
+            if displayed_borrow:
                 ratio = (
-                    compact_number(borrow.borrow_repay_ratio)
-                    if borrow.borrow_repay_ratio is not None
+                    compact_number(displayed_borrow.borrow_repay_ratio)
+                    if displayed_borrow.borrow_repay_ratio is not None
                     else "n/a"
                 )
                 lines.append(
-                    f"BOR ${compact_number(borrow.borrow_usd)} | "
-                    f"REP ${compact_number(borrow.repay_usd)} | B/R {ratio}"
+                    f"BOR ${compact_number(displayed_borrow.borrow_usd)} | "
+                    f"REP ${compact_number(displayed_borrow.repay_usd)} | B/R {ratio}"
                 )
-                change_3m = calculate_borrow_change(
-                    borrow_history.get(symbol, []), borrow, minutes=3
-                )
-                change_15m = calculate_borrow_change(
-                    borrow_history.get(symbol, []), borrow, minutes=15
-                )
-                lines.append(
-                    f"ΔBOR 3m {self._format_borrow_change(change_3m)} | "
-                    f"15m {self._format_borrow_change(change_15m)}"
-                )
+                if borrow is None:
+                    lines.append(
+                        "⚠️ BOR застарілий: останні дані "
+                        f"{self._format_time(displayed_borrow.source_timestamp)}"
+                    )
+                else:
+                    change_3m = calculate_borrow_change(
+                        borrow_history.get(symbol, []), borrow, minutes=3
+                    )
+                    change_15m = calculate_borrow_change(
+                        borrow_history.get(symbol, []), borrow, minutes=15
+                    )
+                    lines.append(
+                        f"ΔBOR 3m {self._format_borrow_change(change_3m)} | "
+                        f"15m {self._format_borrow_change(change_15m)}"
+                    )
+            elif market:
+                lines.append("BOR/REP: немає даних у поточному джерелі")
             if market:
-                price = (
-                    analyze_price_context(candle_history.get(symbol, []), borrow.source_timestamp)
-                    if borrow
-                    else PriceContext()
+                price = analyze_price_context(
+                    candle_history.get(symbol, []),
+                    market.captured_at,
                 )
                 lines.append(
                     f"Price ${compact_number(market.price)} | "

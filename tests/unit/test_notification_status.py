@@ -3,8 +3,11 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 from app.bot.keyboards import main_keyboard
+from app.models import Base
 from app.models.anomaly import AnomalyEvent
 from app.models.borrow import BorrowSnapshot
+from app.models.database import create_engine_and_session
+from app.models.market import Candle, MarketSnapshot
 from app.models.watch import PumpWatchTransition
 from app.services.collector import CollectionResult
 from app.services.notification_service import (
@@ -91,3 +94,75 @@ def test_only_initial_watch_transition_is_a_pump_notification() -> None:
 
     assert TelegramNotificationService._is_initial_pump_transition(initial) is True
     assert TelegramNotificationService._is_initial_pump_transition(reset) is False
+
+
+async def test_status_marks_stale_borrow_and_still_calculates_price_changes(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'status.db'}"
+    engine, session_factory = create_engine_and_session(database_url)
+    now = datetime(2026, 8, 12, 6, 45, tzinfo=UTC)
+    stale_at = now - timedelta(days=3)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with session_factory() as session:
+            session.add_all(
+                [
+                    BorrowSnapshot(
+                        captured_at=stale_at,
+                        source_timestamp=stale_at,
+                        source_name="bbm_html",
+                        symbol="MUBARAK",
+                        borrow_usd=Decimal("1229000"),
+                        repay_usd=Decimal("888700"),
+                        borrow_repay_ratio=Decimal("1.4"),
+                    ),
+                    BorrowSnapshot(
+                        captured_at=now,
+                        source_timestamp=now,
+                        source_name="bbm_html",
+                        symbol="LUNA",
+                        borrow_usd=Decimal("1000000"),
+                        repay_usd=Decimal("500000"),
+                        borrow_repay_ratio=Decimal("2"),
+                    ),
+                    MarketSnapshot(
+                        captured_at=now,
+                        symbol="MUBARAK",
+                        market_type="spot",
+                        price=Decimal("1.048"),
+                        quote_volume_24h=Decimal("3950000"),
+                    ),
+                ]
+            )
+            for index in range(49):
+                opened = now - timedelta(hours=4) + timedelta(minutes=index * 5)
+                close = Decimal("1") + Decimal(index) * Decimal("0.001")
+                session.add(
+                    Candle(
+                        symbol="MUBARAK",
+                        market_type="spot",
+                        interval="5m",
+                        open_time=opened,
+                        open=close,
+                        high=close,
+                        low=close,
+                        close=close,
+                        volume=Decimal("1000"),
+                        quote_volume=Decimal("1000"),
+                        trades_count=10,
+                        close_time=opened + timedelta(minutes=5) - timedelta(milliseconds=1),
+                    )
+                )
+            await session.commit()
+
+        notifier = TelegramNotificationService(AsyncMock(), session_factory)
+        status = await notifier.render_status()
+
+        mubarak_block = status.split("🪙 MUBARAK", 1)[1]
+        assert "BOR $1.23M | REP $888.70K | B/R 1.4" in mubarak_block
+        assert "⚠️ BOR застарілий" in mubarak_block
+        assert "1h n/a" not in mubarak_block
+        assert "4h n/a" not in mubarak_block
+        assert "Режим: UNKNOWN" not in mubarak_block
+    finally:
+        await engine.dispose()

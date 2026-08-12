@@ -156,11 +156,32 @@ BORROW_HTML_URL=https://bbm.iflint.pro/
 COLLECTION_INTERVAL_SECONDS=30
 ```
 
-Запуск:
+Ручний запуск для розробки або діагностики:
 
 ```bash
 .venv/bin/python -m app.main
 ```
+
+На робочому Mac основний локальний інстанс встановлений як macOS LaunchAgent
+`com.margin-anomaly-monitor`. Він запускається після входу користувача та
+автоматично перезапускається після аварійного завершення. Жива робоча копія,
+SQLite-база й журнали розміщені поза захищеною папкою Documents:
+
+```text
+/Users/localadmin/Library/Application Support/MarginAnomalyMonitor
+```
+
+Перевірка та перезапуск служби:
+
+```bash
+launchctl print gui/$(id -u)/com.margin-anomaly-monitor
+launchctl kickstart -k gui/$(id -u)/com.margin-anomaly-monitor
+tail -f "/Users/localadmin/Library/Application Support/MarginAnomalyMonitor/logs/bot.log"
+```
+
+Не запускайте ручну копію одночасно зі службою: два Telegram long-polling
+процеси конфліктуватимуть. Після зміни коду робочу копію служби потрібно окремо
+синхронізувати з репозиторієм і перезапустити.
 
 Перший BBM snapshot створює базову лінію. Починаючи з наступного оновлення сервіс
 рахує ΔBOR за 3/5/15/30/60/240/1440 хвилин. Екстремальний одиничний стрибок може
@@ -202,6 +223,12 @@ market price потрібна для high-water mark і величини від�
 незакрита candle оновлюється через database upsert, а структурне рішення все одно
 використовує її лише після `close_time`. BOR/REP продовжують змінюватися тільки
 разом із новим BBM snapshot.
+
+Якщо BBM перестає включати монету в поточний кадр, `/status` не видає її останні
+BOR/REP за свіжі: показується попередження `BOR застарілий` із точним часом
+останнього значення. Price change 1h/4h і PUMP/NO PUMP при цьому рахуються від
+актуальних Binance candles. Прострочений WATCH закривається незалежно від того,
+чи лишилася монета в поточному BBM-кадрі.
 
 ### Low-cap фокус і Telegram-шум
 

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
@@ -210,14 +210,28 @@ class ReversalTracker:
                 return ReversalTrackingResult()
             effective_evaluated_at = evaluated_at or latest_source_at
 
+            active_rows = list(
+                (
+                    await session.scalars(
+                        select(PumpWatch)
+                        .where(PumpWatch.status.in_(ACTIVE_STATUSES))
+                        .order_by(PumpWatch.started_at.desc())
+                    )
+                ).all()
+            )
+            active_symbols = {row.symbol for row in active_rows}
+
             borrow_rows = list(
                 (
                     await session.scalars(
                         select(BorrowSnapshot)
                         .where(
-                            BorrowSnapshot.source_timestamp
-                            >= latest_source_at
-                            - timedelta(hours=self.settings.reversal_watch_hours)
+                            or_(
+                                BorrowSnapshot.source_timestamp
+                                >= latest_source_at
+                                - timedelta(hours=self.settings.reversal_watch_hours),
+                                BorrowSnapshot.symbol.in_(active_symbols),
+                            )
                         )
                         .order_by(BorrowSnapshot.source_timestamp.desc())
                     )
@@ -266,15 +280,6 @@ class ReversalTracker:
             for row in candle_rows:
                 candle_history.setdefault(row.symbol, []).append(row)
 
-            active_rows = list(
-                (
-                    await session.scalars(
-                        select(PumpWatch)
-                        .where(PumpWatch.status.in_(ACTIVE_STATUSES))
-                        .order_by(PumpWatch.started_at.desc())
-                    )
-                ).all()
-            )
             active: dict[tuple[str, str], PumpWatch] = {}
             for row in active_rows:
                 active.setdefault((row.symbol, row.source_name), row)
